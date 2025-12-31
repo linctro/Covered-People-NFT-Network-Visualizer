@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Covered People NFT Network Visualizer</title>
+
+    <!-- Using Google Fonts for Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+
+    <link rel="stylesheet" href="resources/styles/style.css">
+</head>
+
+<body>
+    <div id="visualizer-container">
+        <canvas id="networkCanvas"></canvas>
+
+        <!-- Sidebar: Stats & Legend -->
+        <div id="sidebar" class="glass-panel">
+            <h1>Covered People</h1>
+            <div class="stats-group">
+                <div class="stat-item">
+                    <span class="label">Total NFTs</span>
+                    <span class="value" id="stat-total-nfts">...</span>
+                </div>
+                <div class="stat-item">
+                    <span class="label">Unique NFTs</span>
+                    <span class="value" id="stat-unique-nfts">...</span>
+                </div>
+                <div class="stat-item">
+                    <span class="label">Total Transfers</span>
+                    <span class="value" id="stat-total-transfers">...</span>
+                </div>
+            </div>
+
+            <div class="legend">
+                <h3>Display Filters</h3>
+                <div class="legend-item clickable" id="toggle-genesis">
+                    <input type="checkbox" id="cb-genesis" checked>
+                    <span class="dot genesis"></span>
+                    <span>Genesis (200)</span>
+                </div>
+                <div class="legend-item clickable" id="toggle-generative">
+                    <input type="checkbox" id="cb-generative" checked>
+                    <span class="dot generative"></span>
+                    <span>Generative (3,333)</span>
+                </div>
+                <div class="legend-item">
+                    <span class="dot year-ring"></span>
+                    <span>Year Ring</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Controls -->
+        <div id="controls" class="glass-panel">
+            <button id="btn-reset" title="Reset View">↺</button>
+            <button id="btn-zoom-in" title="Zoom In">+</button>
+            <button id="btn-zoom-out" title="Zoom Out">-</button>
+        </div>
+
+        <!-- Detail Panel (Hidden by default) -->
+        <div id="detail-panel" class="glass-panel hidden">
+            <button id="btn-close-detail">×</button>
+            <h2 id="detail-id">NFT #---</h2>
+            <div class="detail-image-container"
+                style="width: 50px; height: 50px; border-radius: 5px; overflow: hidden; margin-bottom: 5px;">
+                <img id="detail-image" src="" alt="NFT Preview" class="hidden"
+                    style="width: 100%; height: 100%; object-fit: cover;">
+                <div id="detail-image-placeholder"
+                    style="width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.1); font-size: 10px;">
+                    Loading</div>
+            </div>
+            <div class="detail-row">
+                <span>Token ID:</span>
+                <span id="detail-token-id" class="value-scroll">-</span>
+            </div>
+            <div class="detail-row">
+                <span>Type:</span>
+                <span id="detail-type">-</span>
+            </div>
+            <div class="detail-row">
+                <span>Year:</span>
+                <span id="detail-year">-</span>
+            </div>
+            <div class="detail-row">
+                <span>Date:</span>
+                <span id="detail-date">-</span>
+            </div>
+            <div class="detail-row">
+                <span>From:</span>
+                <span id="detail-from">-</span>
+            </div>
+            <div class="detail-row">
+                <span>To:</span>
+                <span id="detail-to">-</span>
+            </div>
+            <div class="detail-row explorer-link">
+                <a id="detail-etherscan" href="#" target="_blank">Etherscanで詳細を見る ↗</a>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+
+</html>
