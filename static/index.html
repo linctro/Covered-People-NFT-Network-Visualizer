@@ -15,6 +15,23 @@
 </head>
 
 <body>
+    <!-- Loading Screen -->
+    <div id="loading-screen">
+        <div class="loading-content">
+            <h1 class="animate-title">Covered People</h1>
+            <p class="animate-subtitle">Visualizing NFT Network...</p>
+            <div class="progress-container">
+                <div id="progress-bar"></div>
+            </div>
+            <p id="loading-status">Connecting to Ethereum & Polygon...</p>
+        </div>
+    </div>
+
+    <!-- Icon Contraction Overlay -->
+    <div id="icon-overlay" class="hidden">
+        <img src="resources/images/coverd-icon.png" alt="Covered Icon" id="contracting-icon">
+    </div>
+
     <div id="visualizer-container">
         <canvas id="networkCanvas"></canvas>
 
@@ -26,10 +43,7 @@
                     <span class="label">Total NFTs</span>
                     <span class="value" id="stat-total-nfts">...</span>
                 </div>
-                <div class="stat-item">
-                    <span class="label">Unique NFTs</span>
-                    <span class="value" id="stat-unique-nfts">...</span>
-                </div>
+
                 <div class="stat-item">
                     <span class="label">Total Transfers</span>
                     <span class="value" id="stat-total-transfers">...</span>
@@ -52,6 +66,21 @@
                     <span class="dot year-ring"></span>
                     <span>Year Ring</span>
                 </div>
+            </div>
+
+            <div class="external-links">
+                <a href="https://opensea.io/collection/coverdpeople-collection" target="_blank" class="link-item">
+                    <img src="resources/images/opensea-icon.png" alt="OpenSea">
+                    <span>Genesis【covered-peaple】</span>
+                </a>
+                <a href="https://opensea.io/collection/coveredvillage" target="_blank" class="link-item">
+                    <img src="resources/images/opensea-icon.png" alt="OpenSea">
+                    <span>ジェネラティブ【covered-village】</span>
+                </a>
+                <a href="https://twitter.com/coveredpeople" target="_blank" class="link-item">
+                    <img src="resources/images/x-logo-icon.png" alt="Twitter">
+                    <span>公式Twitter</span>
+                </a>
             </div>
         </div>
 

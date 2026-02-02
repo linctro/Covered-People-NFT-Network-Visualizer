@@ -14,9 +14,9 @@ const CONFIG = {
         text: '#ffffff'
     },
     counts: {
-        genesis: 200,
+        genesis: 198,
         generative: 3333,
-        total: 3533
+        total: 3531
     },
     years: {
         start: 2022,
@@ -53,141 +53,146 @@ const state = {
     visibility: {
         Genesis: true,
         Generative: true
+    },
+    // Progressive Loading State
+    loading: {
+        totalSteps: 200 + 500, // Adjusted estimate for 50 pages
+        currentSteps: 0,
+        completed: false,
+        allDataLoaded: false,
+        titleStartTime: Date.now() // Track when the title started showing
     }
 };
+
+class RateLimiter {
+    constructor(maxPerSecond) {
+        this.queue = [];
+        this.maxPerSecond = maxPerSecond;
+        this.currentSecond = Math.floor(Date.now() / 1000);
+        this.countThisSecond = 0;
+        this.processing = false;
+    }
+
+    add(fn) {
+        this.queue.push(fn);
+        this.process();
+    }
+
+    async process() {
+        if (this.processing) return;
+        this.processing = true;
+
+        while (this.queue.length > 0) {
+            const nowSecond = Math.floor(Date.now() / 1000);
+
+            if (nowSecond > this.currentSecond) {
+                this.currentSecond = nowSecond;
+                this.countThisSecond = 0;
+            }
+
+            if (this.countThisSecond < this.maxPerSecond) {
+                const fn = this.queue.shift();
+                this.countThisSecond++;
+                fn().catch(console.error); // Execute without awaiting to keep queue moving
+            } else {
+                // Wait for next second
+                await new Promise(r => setTimeout(r, 1000 - (Date.now() % 1000) + 10));
+            }
+        }
+        this.processing = false;
+    }
+}
+
+const apiLimiter = new RateLimiter(2); // Reduced to ~10 CU/s for maximum safety with batch fetching
+
+async function fetchWithRetry(url, options, retries = 3, backoff = 1000) {
+    try {
+        const response = await fetch(url, options);
+        // Retry on 429 (Too Many Requests) or 401 (Unauthorized - sometimes transient) or 5xx server errors
+        if (!response.ok && (response.status === 429 || response.status === 401 || response.status >= 500)) {
+            if (retries > 0) {
+                // console.warn(`Retrying ${url} due to ${response.status}. Retries left: ${retries}`);
+                await new Promise(r => setTimeout(r, backoff));
+                return fetchWithRetry(url, options, retries - 1, backoff * 2);
+            }
+        }
+        return response;
+    } catch (err) {
+        if (retries > 0) {
+            await new Promise(r => setTimeout(r, backoff));
+            return fetchWithRetry(url, options, retries - 1, backoff * 2);
+        }
+        throw err;
+    }
+}
+
+function updateProgress(step = 1, statusText) {
+    state.loading.currentSteps += step;
+    const progress = Math.min(100, (state.loading.currentSteps / state.loading.totalSteps) * 100);
+    const bar = document.getElementById('progress-bar');
+    const status = document.getElementById('loading-status');
+    if (bar) bar.style.width = `${progress}%`;
+    if (status && statusText) status.textContent = statusText;
+
+    // Fade out loading screen logic moved to fetchRealData with fixed 10s timer
+}
+
+function startIconAnimation() {
+    const overlay = document.getElementById('icon-overlay');
+    const icon = document.getElementById('contracting-icon');
+    if (!overlay || !icon) return;
+
+    overlay.classList.remove('hidden');
+    icon.classList.add('animate-contract');
+
+    // Remove overlay after animation finishes (1.5s)
+    setTimeout(() => {
+        overlay.classList.add('fade-out');
+        setTimeout(() => {
+            overlay.classList.add('hidden');
+        }, 1000);
+    }, 1500);
+}
+
 
 // --- Data Generation ---
 
 async function fetchRealData() {
-    // Configuration moved to CONFIG.contracts
-
-    // Helper for Rate Limiting
-    const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
-    // Helper: Check if token_id matches the issuer (OpenSea Shared Storefront logic)
-    const isIssuerToken = (tokenId) => {
-        try {
-            // OpenSea ID: [Address (160 bits)] | [Index (96 bits)]
-            const idBigInt = BigInt(tokenId);
-            const addressPart = (idBigInt >> 96n).toString(16).padStart(40, '0');
-            return addressPart.toLowerCase() === CONFIG.contracts.issuer.replace('0x', '');
-        } catch (e) {
-            console.error("Token ID Check Error:", e);
-            return false;
-        }
-    };
-
-    // 1. Fetch Genesis Data (From Issuer's Wallet History)
-    // Supports both Ethereum and Polygon
-    const fetchGenesisHistory = async () => {
-        // Sub-function to fetch for a specific chain
-        const fetchChain = async (chain, targetContract) => {
-            let chainResults = [];
-            let cursor = null;
-            let page = 1;
-
-            console.log(`Fetching Genesis History (${chain.toUpperCase()} - Issuer Wallet)...`);
-
-            do {
-                const body = {
-                    endpoint: `/${CONFIG.contracts.issuer}/nft/transfers`,
-                    params: {
-                        chain: chain,
-                        format: 'decimal',
-                        limit: '100'
-                    }
-                };
-                if (cursor) body.params.cursor = cursor;
-
-                try {
-                    const response = await fetch('/api/proxy', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(body)
-                    });
-
-                    if (!response.ok) throw new Error(`API Error: ${response.status}`);
-                    const data = await response.json();
-
-                    if (data.result) {
-                        // Filter for OpenSea Shared Contract (Specific to Chain) AND Issuer's Token ID Pattern
-                        const filtered = data.result.filter(tx =>
-                            tx.token_address.toLowerCase() === targetContract &&
-                            isIssuerToken(tx.token_id)
-                        );
-
-                        chainResults = chainResults.concat(filtered);
-                        console.log(`Genesis (${chain}) Page ${page}: Found ${filtered.length} relevant transfers`);
-                    }
-                    cursor = data.cursor;
-                    page++;
-                    await sleep(300); // Rate limit
-
-                } catch (err) {
-                    console.error(`Genesis Fetch Error (${chain}):`, err);
-                    break;
-                }
-            } while (cursor && page <= 10); // Check enough pages on both chains
-
-            return chainResults;
-        };
-
-        // Run both fetches
-        const [ethData, polyData] = await Promise.all([
-            fetchChain('eth', CONFIG.contracts.openseaEth),
-            fetchChain('polygon', CONFIG.contracts.openseaPoly)
-        ]);
-
-        const allResults = ethData.concat(polyData);
-        console.log(`Finished Genesis: ${allResults.length} validated transfers (Eth: ${ethData.length}, Poly: ${polyData.length}).`);
-        return allResults;
-    };
-
-    // 2. Fetch Generative Data (Contract Transfers)
-    // Only on Ethereum separate contract
-    const fetchGenerativeHistory = async () => {
-        let allResults = [];
-        let cursor = null;
-        let page = 1;
-
-        console.log("Fetching Generative History (Contract)...");
-
-        do {
-            const body = {
-                endpoint: `/nft/${CONFIG.contracts.generative}/transfers`,
-                params: { chain: 'eth', format: 'decimal', limit: '100' }
-            };
-            if (cursor) body.params.cursor = cursor;
-
-            try {
-                const response = await fetch('/api/proxy', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(body)
-                });
-                const data = await response.json();
-                if (data.result) {
-                    allResults = allResults.concat(data.result);
-                    console.log(`Generative Page ${page}: ${data.result.length} items`);
-                }
-                cursor = data.cursor;
-                page++;
-                await sleep(300);
-            } catch (e) {
-                break;
-            }
-        } while (cursor && page <= 100);
-
-        return allResults;
-    };
-
     try {
-        const [genesisData, generativeData] = await Promise.all([
-            fetchGenesisHistory(),
-            fetchGenerativeHistory()
-        ]);
+        // Initialize Issuer Node immediately
+        const issuerNode = {
+            id: 'issuer',
+            type: 'issuer',
+            x: 0, y: 0,
+            color: '#ffffff',
+            radius: CONFIG.radii.issuer,
+            year: 2022,
+            nftType: 'Issuer',
+            transfers: 'N/A',
+            opacity: 0,
+            appearanceTime: Date.now()
+        };
+        state.nodes.push(issuerNode);
 
-        processApiData({ genesis: genesisData, generative: generativeData });
+        // Run fetchers in parallel but they will update state incrementally
+        fetchGenesisHistory();
+        fetchGenerativeHistory();
+
+        // Handle title duration (10 seconds)
+        const minDuration = 10000; // 10 seconds
+        const elapsed = Date.now() - state.loading.titleStartTime;
+        const remaining = Math.max(0, minDuration - elapsed);
+
+        setTimeout(() => {
+            const screen = document.getElementById('loading-screen');
+            if (screen) {
+                screen.classList.add('fade-out');
+                state.loading.completed = true;
+
+                // Trigger icon animation immediately after loading screen fades
+                startIconAnimation();
+            }
+        }, remaining);
 
     } catch (e) {
         console.error("Fatal Fetch Error:", e);
@@ -195,136 +200,411 @@ async function fetchRealData() {
     }
 }
 
-function processApiData(data) {
-    const nodes = [];
-    const edges = [];
+// Global lookup to manage path sorting per token incrementally
+const tokenHistories = {};
 
-    // 0. Issuer Node
-    const issuerNode = {
-        id: 'issuer',
-        type: 'issuer',
-        x: 0, y: 0,
-        color: '#ffffff',
-        radius: CONFIG.radii.issuer,
-        year: 2022,
-        nftType: 'Issuer',
-        transfers: 'N/A'
-    };
-    nodes.push(issuerNode);
+function addNodeIncrementally(tx, typeColor, typeLabel) {
+    const tokenId = tx.token_id;
+    if (!tokenHistories[tokenId]) tokenHistories[tokenId] = [];
+    tokenHistories[tokenId].push(tx);
 
-    // Helper: Year from Timestamp
+    // Sort history by time every time a new event for this token arrives
+    tokenHistories[tokenId].sort((a, b) => new Date(a.block_timestamp) - new Date(b.block_timestamp));
+
+    // Re-generate nodes and edges for THIS TOKEN ONLY to keep it simple and efficient
+    // 1. Remove old nodes/edges for this token
+    state.nodes = state.nodes.filter(n => n.token_id !== tokenId || n.type === 'issuer');
+    state.edges = state.edges.filter(e =>
+        (e.source.token_id !== tokenId && e.target.token_id !== tokenId) ||
+        (e.source.id === 'issuer' && e.target.token_id !== tokenId)
+    );
+
+    let previousNode = null;
+    let idHash = 0;
+    const idStr = tokenId.toString();
+    for (let i = 0; i < idStr.length; i++) {
+        idHash = ((idHash << 5) - idHash) + idStr.charCodeAt(i);
+        idHash |= 0;
+    }
+    const baseAngle = Math.abs(idHash % 360) * (Math.PI / 180);
+
     const getYear = (ts) => ts ? parseInt(ts.substring(0, 4)) : 2022;
-
-    // Helper: Random Angle & Radius
-    const randomAngle = () => Math.random() * Math.PI * 2;
     const getRadius = (timestamp) => {
         const date = new Date(timestamp);
         const year = date.getFullYear();
         const startOfYear = new Date(year, 0, 1).getTime();
         const endOfYear = new Date(year + 1, 0, 1).getTime();
         const fraction = (date.getTime() - startOfYear) / (endOfYear - startOfYear);
-
-        // Radius = Start + (YearIndex + Fraction) * Gap
-        // This spreads points strictly by time: Jan 1 is inner, Dec 31 is outer edge of the ring.
         const yearIndex = Math.max(0, year - 2022);
         return CONFIG.radii.start + ((yearIndex + fraction) * CONFIG.radii.gap);
     };
 
-    // Processor mainly for Path Linking
-    const processSet = (dataset, typeColor, typeLabel) => {
-        if (!dataset) return;
+    tokenHistories[tokenId].forEach((event, idx) => {
+        const year = getYear(event.block_timestamp);
+        const angleJitter = (Math.random() - 0.5) * 0.1;
+        const finalAngle = baseAngle + angleJitter;
+        const r = getRadius(event.block_timestamp);
+        const nodeRadius = typeLabel === 'Genesis' ? CONFIG.radii.genesis : CONFIG.radii.node;
 
-        // Group by Token ID to sort by time
-        const tokens = {};
-        dataset.forEach(tx => {
-            if (!tokens[tx.token_id]) tokens[tx.token_id] = [];
-            tokens[tx.token_id].push(tx);
-        });
+        const node = {
+            id: `${typeLabel}-${tokenId}-${event.transaction_hash}-${idx}`,
+            token_id: tokenId,
+            x: Math.cos(finalAngle) * r,
+            y: Math.sin(finalAngle) * r,
+            color: typeColor,
+            radius: nodeRadius,
+            year: year,
+            nftType: typeLabel,
+            timestamp: event.block_timestamp,
+            tx_hash: event.transaction_hash,
+            from: event.from_address,
+            to: event.to_address,
+            image: event.custom_image,
+            name: event.custom_name,
+            // Animation state
+            opacity: 0,
+            appearanceTime: Date.now()
+        };
 
-        // Create Nodes & Sequential Edges
-        Object.keys(tokens).forEach(tokenId => {
-            // Sort by block number/timestamp ascending
-            const history = tokens[tokenId].sort((a, b) =>
-                new Date(a.block_timestamp) - new Date(b.block_timestamp)
-            );
+        state.nodes.push(node);
 
-            let previousNode = null;
-
-            // Generate a persistent base angle for this token based on ID
-            // Simple hash that ensures distribution across 360 degrees
-            let idHash = 0;
-            const idStr = tokenId.toString();
-            for (let i = 0; i < idStr.length; i++) {
-                idHash = ((idHash << 5) - idHash) + idStr.charCodeAt(i);
-                idHash |= 0; // Convert to 32bit integer
-            }
-            const baseAngle = Math.abs(idHash % 360) * (Math.PI / 180);
-
-            history.forEach((tx, idx) => {
-                const year = getYear(tx.block_timestamp);
-
-                // Keep the base angle but add a TINY jitter so multiple points for same year spread slightly.
-                const angleJitter = (Math.random() - 0.5) * 0.1;
-                const finalAngle = baseAngle + angleJitter;
-
-                const r = getRadius(tx.block_timestamp);
-                const nodeRadius = typeLabel === 'Genesis' ? CONFIG.radii.genesis : CONFIG.radii.node;
-
-                const node = {
-                    id: `${typeLabel}-${tokenId}-${tx.transaction_hash}-${idx}`,
-                    token_id: tokenId,
-                    x: Math.cos(finalAngle) * r,
-                    y: Math.sin(finalAngle) * r,
-                    color: typeColor,
-                    radius: nodeRadius,
-                    year: year,
-                    nftType: typeLabel,
-                    timestamp: tx.block_timestamp,
-                    tx_hash: tx.transaction_hash,
-                    from: tx.from_address,
-                    to: tx.to_address
-                };
-
-                nodes.push(node);
-
-                // Create Path Edge (Sequential)
-                if (previousNode) {
-                    edges.push({ source: previousNode, target: node, type: 'path' });
-                } else if (idx === 0) {
-                    // Link first event to Issuer (simulating mint origin)
-                    edges.push({ source: issuerNode, target: node, type: 'mint' });
-                }
-
-                previousNode = node;
-            });
-        });
-    };
-
-    processSet(data.genesis, CONFIG.colors.genesis, 'Genesis');
-    processSet(data.generative, CONFIG.colors.generative, 'Generative');
-
-    state.nodes = nodes;
-    state.edges = edges;
-
-    // Update Stats
-    const totalEvents = (nodes.length - 1);
-    if (document.getElementById('stat-total-transfers')) {
-        document.getElementById('stat-total-transfers').textContent = totalEvents.toLocaleString();
-    }
-
-    // Calculate Unique NFTs
-    const uniqueIDs = new Set();
-    nodes.forEach(n => {
-        if (n.token_id) uniqueIDs.add(n.token_id);
+        if (previousNode) {
+            state.edges.push({ source: previousNode, target: node, type: 'path' });
+        } else if (idx === 0) {
+            const issuer = state.nodes.find(n => n.id === 'issuer');
+            state.edges.push({ source: issuer, target: node, type: 'mint' });
+        }
+        previousNode = node;
     });
 
-    if (document.getElementById('stat-unique-nfts')) {
-        document.getElementById('stat-unique-nfts').textContent = uniqueIDs.size.toLocaleString();
-    }
-    document.getElementById('stat-total-nfts').textContent = CONFIG.counts.total.toLocaleString() + " (Target)";
-
-    console.log(`Visualization Updated: ${nodes.length} nodes (transfers), ${edges.length} edges. Unique NFTs: ${uniqueIDs.size}`);
+    // Update Stats
+    updateStats();
 }
+
+function updateStats() {
+    const totalEvents = state.nodes.length - 1;
+    const totalEl = document.getElementById('stat-total-transfers');
+    if (totalEl) totalEl.textContent = totalEvents.toLocaleString();
+
+    // Unique NFT count calculation removed per user request
+
+    const statusText = state.loading.allDataLoaded ? " (Complete)" :
+        state.loading.fetchingMissing ? ` (Filling Gap: ${state.loading.missingLoaded}/${state.loading.missingTotal})` :
+            " (Loading History...)";
+    document.getElementById('stat-total-nfts').textContent = CONFIG.counts.total.toLocaleString() + statusText;
+}
+
+// 1. Fetch Genesis Data (Incremental)
+async function fetchGenesisHistory() {
+    try {
+        const response = await fetch('data/genesis_nfts.json');
+        if (!response.ok) throw new Error("Failed to load local JSON");
+        const targetList = await response.json();
+
+        const failedGenesisItems = [];
+        let processedCount = 0;
+        state.loading.failedGenesisItems = []; // Initialize for global state tracking
+
+        for (let i = 0; i < targetList.length; i++) {
+            const target = targetList[i];
+            const isPoly = target.token_address.toLowerCase().startsWith('0x2953');
+            const reqChain = isPoly ? 'polygon' : 'eth';
+
+            updateProgress(1, `Processing Genesis: ${target.name || target.token_id}`);
+
+            apiLimiter.add(async () => {
+                let success = false;
+                try {
+                    // 1. Try Transfers
+                    const body = {
+                        endpoint: `/nft/${target.token_address}/${target.token_id}/transfers`,
+                        params: { chain: reqChain, format: 'decimal', limit: '100' }
+                    };
+
+                    const apiRes = await fetchWithRetry('/api/proxy', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(body)
+                    });
+
+                    if (apiRes.ok) {
+                        const data = await apiRes.json();
+                        if (data.result && data.result.length > 0) {
+                            data.result.forEach(tx => {
+                                const enriched = {
+                                    ...tx,
+                                    custom_image: target.image_url,
+                                    custom_name: target.name,
+                                    is_genesis_target: true
+                                };
+                                addNodeIncrementally(enriched, CONFIG.colors.genesis, 'Genesis');
+                            });
+                            success = true;
+                        }
+                    }
+
+                    // 2. Fallback: Try Owners
+                    if (!success) {
+                        const ownerBody = {
+                            endpoint: `/nft/${target.token_address}/${target.token_id}/owners`,
+                            params: { chain: reqChain, format: 'decimal' }
+                        };
+                        const ownerRes = await fetchWithRetry('/api/proxy', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(ownerBody)
+                        });
+
+                        if (ownerRes.ok) {
+                            const ownerData = await ownerRes.json();
+                            if (ownerData.result && ownerData.result.length > 0) {
+                                const ownerInfo = ownerData.result[0];
+                                const pseudoTx = {
+                                    token_id: target.token_id,
+                                    transaction_hash: `genesis-fallback-${target.token_id}`,
+                                    block_timestamp: new Date('2022-01-01').toISOString(),
+                                    from_address: '0x0000000000000000000000000000000000000000',
+                                    to_address: ownerInfo.owner_of,
+                                    value: '0',
+                                    custom_image: target.image_url,
+                                    custom_name: target.name,
+                                    is_genesis_target: true
+                                };
+                                addNodeIncrementally(pseudoTx, CONFIG.colors.genesis, 'Genesis');
+                                success = true;
+                                console.log(`[Genesis] Recovered ${target.name} using Owner data.`);
+                            }
+                        }
+                    }
+
+                    if (!success) {
+                        console.warn(`[Genesis] Failed to fetch data for ${target.name || target.token_id}`);
+                        failedGenesisItems.push(target);
+                        state.loading.failedGenesisItems.push(target); // Update global state
+                    }
+
+                } catch (err) {
+                    console.error(`Error for ${target.name}:`, err);
+                    failedGenesisItems.push(target);
+                    state.loading.failedGenesisItems.push(target); // Update global state
+                } finally {
+                    processedCount++;
+                    // If this is the last item, print the summary
+                    if (processedCount === targetList.length) {
+                        if (failedGenesisItems.length > 0) {
+                            console.error("=== FAILED GENESIS LIST ===");
+                            console.table(failedGenesisItems.map(item => ({
+                                name: item.name,
+                                id: item.token_id,
+                                address: item.token_address
+                            })));
+                            console.error(`Total Failed Genesis: ${failedGenesisItems.length}`);
+                        } else {
+                            console.log("[Genesis] All items successfully loaded.");
+                        }
+                    }
+                }
+            });
+        }
+    } catch (e) {
+        console.error("Genesis Fetch Error:", e);
+    }
+}
+
+// 2. Fetch Generative Data (Incremental)
+async function fetchGenerativeHistory() {
+    let cursor = null;
+    let page = 1;
+
+    do {
+        const body = {
+            endpoint: `/nft/${CONFIG.contracts.generative}/transfers`,
+            params: { chain: 'eth', format: 'decimal', limit: '100' }
+        };
+        if (cursor) body.params.cursor = cursor;
+
+        try {
+            updateProgress(10, `Loading Generative History (Page ${page})...`);
+            const response = await fetch('/api/proxy', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+            const data = await response.json();
+            if (data.result) {
+                data.result.forEach(tx => {
+                    addNodeIncrementally(tx, CONFIG.colors.generative, 'Generative');
+                });
+            }
+            cursor = data.cursor;
+            page++;
+            await new Promise(r => setTimeout(r, 200));
+        } catch (e) {
+            break;
+        }
+    } while (cursor && page <= 50); // Limit to 50 pages of history
+
+    // Discovery Phase: Fetch ALL tokens in contract
+    fetchGenerativeDiscovery();
+}
+
+// 3. New Discovery Phase: Fetch ALL NFTs in the contract
+async function fetchGenerativeDiscovery() {
+    state.loading.fetchingMissing = true;
+    updateStats();
+
+    console.log("[Discovery] Starting full contract scan...");
+
+    let cursor = null;
+    let page = 1;
+    let totalFound = 0;
+
+    // Existing IDs from History Phase
+    const existingIds = new Set();
+    state.nodes.forEach(n => {
+        if (n.nftType === 'Generative' && n.token_id) {
+            existingIds.add(n.token_id);
+        }
+    });
+
+    do {
+        const body = {
+            endpoint: `/nft/${CONFIG.contracts.generative}`,
+            params: { chain: 'eth', format: 'decimal', limit: '100' }
+        };
+        if (cursor) body.params.cursor = cursor;
+
+        apiLimiter.add(async () => {
+            try {
+                updateProgress(0, `Scanning Contract (Page ${page})...`);
+                const response = await fetchWithRetry('/api/proxy', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.result) {
+                        data.result.forEach(nft => {
+                            totalFound++;
+                            // Only add if not already captured by history
+                            if (!existingIds.has(nft.token_id)) {
+                                // Create pseudo-transaction for visualization
+                                const pseudoTx = {
+                                    token_id: nft.token_id,
+                                    transaction_hash: `discovery-${nft.token_id}`,
+                                    block_timestamp: new Date('2022-11-22').toISOString(), // Fixed date: 2022-11-22
+                                    from_address: '0x0000000000000000000000000000000000000000',
+                                    to_address: nft.owner_of,
+                                    value: '0',
+                                    custom_name: nft.name || `CloneX #${nft.token_id}`,
+                                    custom_image: nft.metadata ? JSON.parse(nft.metadata).image : null
+                                };
+                                addNodeIncrementally(pseudoTx, CONFIG.colors.generative, 'Generative');
+                                existingIds.add(nft.token_id); // Mark as added
+                            }
+                        });
+                    }
+                    cursor = data.cursor; // Update cursor for outer loop? 
+                    // Note: Ideally cursor logic should be handled linearly or recursively inside the limiter task 
+                    // provided we don't spawn all page requests at once. 
+                    // BUT since we use a RateLimiter queue, we need to handle the cursor carefully.
+                    // The standard loop `do...while` here runs synchronously and submits jobs.
+                    // However, we rely on the `cursor` from the PREVIOUS fetch to form the NEXT request body.
+                    // Thus, we CANNOT use a simple `do..while` loop to queue jobs because we don't know the next cursor yet!
+                    // WE MUST RECURSE.
+                }
+            } catch (e) {
+                console.error("Discovery Error:", e);
+            }
+        });
+
+        // Wait for the specific job to complete? No, RateLimiter.add is fire-and-forget logic usually.
+        // We need a linear fetcher for pagination.
+
+        // Let's break the loop and use a recursive function instead
+        break;
+
+    } while (false);
+
+    // Actual Recursive Fetcher
+    const fetchPage = async (currentCursor) => {
+        const body = {
+            endpoint: `/nft/${CONFIG.contracts.generative}`,
+            params: { chain: 'eth', format: 'decimal', limit: '100' }
+        };
+        if (currentCursor) body.params.cursor = currentCursor;
+
+        try {
+            updateProgress(0, `Scanning (Page ${page}). Total Found: ${totalFound}`);
+
+            const response = await fetchWithRetry('/api/proxy', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                if (data.result) {
+                    data.result.forEach(nft => {
+                        totalFound++;
+                        if (!existingIds.has(nft.token_id)) {
+                            const pseudoTx = {
+                                token_id: nft.token_id,
+                                transaction_hash: `discovery-${nft.token_id}`,
+                                block_timestamp: new Date('2022-11-22').toISOString(), // Fixed date: 2022-11-22
+                                from_address: '0x0000000000000000000000000000000000000000',
+                                to_address: nft.owner_of,
+                                value: '0',
+                                // Metadata handling if available directly
+                                // metadata field is a string json
+                            };
+                            if (nft.metadata) {
+                                try {
+                                    const meta = JSON.parse(nft.metadata);
+                                    pseudoTx.custom_image = meta.image;
+                                } catch (e) { }
+                            }
+                            addNodeIncrementally(pseudoTx, CONFIG.colors.generative, 'Generative');
+                            existingIds.add(nft.token_id);
+                        }
+                    });
+                }
+
+                if (data.cursor) {
+                    page++;
+                    // Schedule next page with RateLimiter
+                    apiLimiter.add(() => fetchPage(data.cursor));
+                } else {
+                    console.log(`[Discovery] Complete. Total Unique Found: ${existingIds.size}`);
+
+                    // Final Gap Check for logging purposes
+                    const missing = [];
+                    for (let i = 1; i <= CONFIG.counts.generative; i++) {
+                        if (!existingIds.has(i.toString())) missing.push(i);
+                    }
+                    if (missing.length > 0) {
+                        console.warn(`[GapAnalysis] Expected ${CONFIG.counts.generative} items, but ${missing.length} are still missing.`, missing);
+                    } else {
+                        console.log("[GapAnalysis] All expected items accounted for.");
+                    }
+
+                    state.loading.allDataLoaded = true;
+                    state.loading.fetchingMissing = false;
+                    updateStats();
+                }
+            }
+        } catch (e) {
+            console.error("Discovery Page Error:", e);
+        }
+    };
+
+    // Kickoff
+    apiLimiter.add(() => fetchPage(null));
+}
+
 
 // Keep mock for fallback
 function generateMockData() {
@@ -435,26 +715,60 @@ function render() {
         const isHovered = state.hoveredNode === node;
         const isSelected = state.selectedNode === node;
 
-        // FIXED PIXEL SIZE logic:
-        // We want the node to be X pixels on screen, regardless of zoom.
-        // Current Scale = state.transform.scale.
-        // Effective Radius in World Space = BaseRadius / Scale.
-        const effectiveRadius = (node.radius / state.transform.scale) * (isHovered ? 1.5 : 1);
+        // Entrance Animation
+        const now = Date.now();
+        const elapsed = now - (node.appearanceTime || now);
+        const opacity = Math.min(1, elapsed / 500);
 
-        ctx.beginPath();
-        ctx.arc(node.x, node.y, effectiveRadius, 0, Math.PI * 2);
-        ctx.fillStyle = (isHovered || isSelected) ? '#ffffff' : node.color;
+        // Scale
+        const animScale = 0.5 + (0.5 * opacity);
+        let effectiveRadius = (node.radius / state.transform.scale) * (isHovered ? 1.5 : 1) * animScale;
 
-        // Highlight logic
-        if (isSelected || isHovered) {
-            ctx.shadowBlur = 10;
-            ctx.shadowColor = node.color;
+        ctx.globalAlpha = opacity;
+
+        // Special rendering for Issuer Node (Center Icon)
+        if (node.id === 'issuer') {
+            // Lazy load issuer image if not loaded
+            if (!node.imgElement) {
+                const img = new Image();
+                img.src = 'resources/images/coverd-icon.png';
+                node.imgElement = img; // attach to node to cache
+            }
+
+            if (node.imgElement.complete && node.imgElement.naturalWidth !== 0) {
+                // Draw Image centered
+                const size = effectiveRadius * 4; // Make it bigger than a dot
+                ctx.save();
+                ctx.beginPath();
+                ctx.arc(node.x, node.y, size / 2, 0, Math.PI * 2);
+                ctx.clip(); // Clip to circle
+                ctx.drawImage(node.imgElement, node.x - size / 2, node.y - size / 2, size, size);
+                ctx.restore();
+            } else {
+                // Fallback to white dot while loading
+                ctx.beginPath();
+                ctx.arc(node.x, node.y, effectiveRadius, 0, Math.PI * 2);
+                ctx.fillStyle = node.color;
+                ctx.fill();
+            }
         } else {
+            // Standard Node Rendering
+            ctx.beginPath();
+            ctx.arc(node.x, node.y, effectiveRadius, 0, Math.PI * 2);
+            ctx.fillStyle = (isHovered || isSelected) ? '#ffffff' : node.color;
+
+            if (isSelected || isHovered) {
+                ctx.shadowBlur = 15;
+                ctx.shadowColor = node.color;
+            } else {
+                ctx.shadowBlur = 0;
+            }
+
+            ctx.fill();
             ctx.shadowBlur = 0;
         }
 
-        ctx.fill();
-        ctx.shadowBlur = 0; // Reset
+        ctx.globalAlpha = 1.0; // Reset
 
         if (isSelected) {
             ctx.lineWidth = 2;
@@ -462,6 +776,7 @@ function render() {
             ctx.stroke();
         }
     }
+
 
     ctx.restore();
     requestAnimationFrame(render);
@@ -631,20 +946,32 @@ function selectNode(node) {
     } else {
         idEl.textContent = `Event #${node.id.split('-').pop()}`;
 
-        // Fetch Image independently (Lazy Load)
-        fetchNftImage(node).then(imageUrl => {
-            if (state.selectedNode === node && imageUrl) {
-                imgEl.src = imageUrl;
-                imgEl.onload = () => {
-                    imgEl.classList.remove('hidden');
-                    imgPlaceholder.classList.add('hidden');
-                };
-            } else if (state.selectedNode === node) {
-                imgPlaceholder.textContent = 'No Image';
-            }
-        });
+        if (node.image) {
+            // Use pre-loaded image from JSON
+            imgEl.src = node.image;
+            imgEl.classList.remove('hidden');
+            imgPlaceholder.classList.add('hidden');
+        } else {
+            // Fetch Image independently (Lazy Load)
+            fetchNftImage(node).then(imageUrl => {
+                if (state.selectedNode === node && imageUrl) {
+                    imgEl.src = imageUrl;
+                    imgEl.onload = () => {
+                        imgEl.classList.remove('hidden');
+                        imgPlaceholder.classList.add('hidden');
+                    };
+                } else if (state.selectedNode === node) {
+                    imgPlaceholder.textContent = 'No Image';
+                }
+            });
+        }
 
         tokenIdEl.textContent = node.token_id || '?';
+
+        // Use custom name if available, otherwise just event ID
+        if (node.name) {
+            idEl.textContent = node.name;
+        }
         dateEl.textContent = node.timestamp ? node.timestamp.split('T')[0] : 'Unknown';
         fromEl.textContent = node.from ? `${node.from.substring(0, 6)}...${node.from.substring(38)}` : '-';
         toEl.textContent = node.to ? `${node.to.substring(0, 6)}...${node.to.substring(38)}` : '-';

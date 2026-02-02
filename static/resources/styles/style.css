@@ -120,6 +120,38 @@ canvas {
     background: transparent;
 }
 
+/* External Links in Sidebar */
+.external-links {
+    margin-top: 24px;
+    padding-top: 16px;
+    border-top: 1px solid var(--glass-border);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.link-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    text-decoration: none;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    transition: color 0.2s, transform 0.2s;
+}
+
+.link-item:hover {
+    color: var(--text-primary);
+    transform: translateX(4px);
+}
+
+.link-item img {
+    width: 18px;
+    height: 18px;
+    object-fit: contain;
+    filter: drop-shadow(0 0 5px rgba(255, 255, 255, 0.2));
+}
+
 /* Controls */
 #controls {
     position: absolute;
@@ -203,5 +235,147 @@ canvas {
         width: calc(100% - 40px);
         top: 20px;
         right: 20px;
+    }
+}
+
+/* Loading Screen Styles */
+#loading-screen {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: var(--bg-dark);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    transition: opacity 1s ease-out, visibility 1s;
+}
+
+#loading-screen.fade-out {
+    opacity: 0;
+    visibility: hidden;
+}
+
+.loading-content {
+    text-align: center;
+    width: 80%;
+    max-width: 600px;
+}
+
+.animate-title {
+    font-size: 3rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+    background: linear-gradient(45deg, #fff, var(--accent-genesis), var(--accent-generative));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: titleShift 3s ease-in-out infinite alternate;
+}
+
+@keyframes titleShift {
+    from {
+        background-position: 0% 50%;
+        filter: drop-shadow(0 0 5px rgba(255, 255, 255, 0.2));
+    }
+
+    to {
+        background-position: 100% 50%;
+        filter: drop-shadow(0 0 15px var(--accent-generative));
+    }
+}
+
+.animate-subtitle {
+    font-size: 1.1rem;
+    color: var(--text-secondary);
+    margin-bottom: 2rem;
+    letter-spacing: 2px;
+    opacity: 0;
+    animation: fadeIn 1s ease-out forwards 0.5s;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.progress-container {
+    width: 100%;
+    height: 4px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 2px;
+    margin-bottom: 1rem;
+    overflow: hidden;
+}
+
+#progress-bar {
+    width: 0%;
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent-genesis), var(--accent-generative));
+    transition: width 0.3s ease-out;
+    box-shadow: 0 0 10px var(--accent-generative);
+}
+
+#loading-status {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    font-family: monospace;
+}
+
+/* Icon Contraction Overlay */
+#icon-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: transparent;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1001;
+    pointer-events: none;
+}
+
+#icon-overlay.hidden {
+    display: none;
+}
+
+#contracting-icon {
+    width: 80vh;
+    height: 80vh;
+    object-fit: contain;
+    opacity: 0;
+}
+
+.animate-contract {
+    animation: contractAndFade 1.5s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+@keyframes contractAndFade {
+    0% {
+        transform: scale(1.5);
+        opacity: 0;
+        filter: blur(10px);
+    }
+
+    20% {
+        transform: scale(1);
+        opacity: 1;
+        filter: blur(0);
+    }
+
+    100% {
+        transform: scale(0);
+        opacity: 0;
     }
 }
