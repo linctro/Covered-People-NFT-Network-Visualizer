@@ -1,59 +1,96 @@
-# デプロイメントガイド (Go Backend)
+# Google Cloud デプロイメントガイド (初心者向け)
 
-このプロジェクトは Go 言語（Golang）を使用した Web アプリケーションとして構成されています。
-クラウドサーバ（Render, Heroku, AWS, Google Cloud Run など）にデプロイする際の手順と注意点をまとめました。
+Google Cloud が初めての方でも簡単にプロジェクトを公開できるよう、**Cloud Shell**（ブラウザ上で使えるターミナル）を使った手順をまとめました。これなら面倒なツールのインストールは不要です。
 
-## 1. プロジェクト構成
+## 前提条件
 
-```text
-.
-├── cmd/system/main.go      # サーバ起動コード (エントリーポイント)
-├── static/                 # 公開される静的ファイル (HTML, CSS, JS)
-├── go.mod                  # Go 依存関係ファイル
-└── deployment.md           # このファイル
-```
+1.  **Google Cloud アカウント**を持っていること。
+2.  **プロジェクト**が作成されていること（まだの場合は [コンソール](https://console.cloud.google.com/) から「プロジェクトの作成」を行ってください）。
+3.  **Moralis API Key** が手元にあること。
 
-## 2. ローカルでの動作確認
+---
 
-ターミナルで以下のコマンドを実行すると、ローカル環境でサーバを起動できます。
+## 手順 1: Cloud Shell を開く
+
+1.  [Google Cloud Console](https://console.cloud.google.com/) にアクセスします。
+2.  画面右上の **ターミナルアイコン**（[>_] のようなボタン）をクリックして「Cloud Shell」を起動します。
+3.  画面下部に黒い画面（ターミナル）が表示されます。
+
+## 手順 2: コードをアップロードする
+
+Cloud Shell のエディタを使ってコードを作成するか、既存の Git リポジトリからクローンします。
+今回は、このプロジェクトのコードが既にある前提で進めます（Gitリポジトリ経由が一番簡単です）。
 
 ```bash
-# プロジェクトルートで実行
-go run ./cmd/server/main.go
+# Gitリポジトリからクローンする場合（例）
+git clone <あなたのリポジトリURL>
+cd Covered-People-NFT-Network-Visualizer
 ```
 
-ブラウザで `http://localhost:8080` にアクセスして、アプリケーションが表示されることを確認してください。
+※ もしローカルにあるファイルをアップロードしたい場合は、Cloud Shell ターミナルの右上にある「︙」メニューから「アップロード」を選んで、ファイル一式をアップロードしてください。
 
-## 3. クラウドへのデプロイ設定
+## 手順 3: デプロイ準備（APIの有効化）
 
-クラウドサービスにデプロイする際は、以下の設定を確認・指定してください。
+Cloud Run と Secret Manager を使うための設定を有効にします。以下のコマンドを Cloud Shell でコピー＆ペーストして実行してください。
 
-### A. 環境変数 (Environment Variables)
+```bash
+# プロジェクトIDを設定（your-project-id は実際のIDに置き換えてください）
+gcloud config set project your-project-id
 
-| 変数名 | 説明 | 設定値の例 |
-|--------|------|------------|
-| `PORT` | アプリがリッスンすべきポート番号 | クラウド側が自動設定することが多い (例: 10000) |
-| `BLOCKCHAIN_API_KEY` | (将来用) ブロックチェーンAPIのキー | `abcdef12345...` |
+# 必要なサービスを有効化
+gcloud services enable run.googleapis.com \
+    secretmanager.googleapis.com \
+    cloudbuild.googleapis.com
+```
 
-### B. ビルド設定 (Build Settings)
+## 手順 4: APIキーを安全に保存 (Secret Manager)
 
-クラウドサービスが「Go アプリケーション」として認識した場合、自動的に検出される場合が多いですが、手動設定が必要な場合は以下を指定します。
+APIキーをコードに直接書くのは危険なので、「Secret Manager」という金庫のような場所に保存します。
 
-- **Build Command (ビルドコマンド)**:
-  ```bash
-  go build -o server ./cmd/server/main.go
-  ```
-  ※ `server` という名前の実行可能ファイルを作成します。
+1.  以下のコマンドを実行します。
+    ```bash
+    printf "あなたのMORALIS_API_KEYをここに貼り付け" | gcloud secrets create moralis-api-key --data-file=-
+    ```
+    ※ `あなたのMORALIS_API_KEY...` の部分を本物のキーに書き換えてから実行してください。
 
-- **Start Command (起動コマンド)**:
-  ```bash
-  ./server
-  ```
+2.  確認メッセージが出たら成功です。これでキーが `moralis-api-key` という名前でクラウド上に安全に保存されました。
 
-- **Root Directory (ルートディレクトリ)**:
-  通常は `.` (現在のディレクトリ) です。
+## 手順 5: Cloud Run へデプロイ
 
-## 4. 注意点
+いよいよアプリを公開します。1つのコマンドで完了します。
 
-- **`static` フォルダ**: 実行ファイル（`server`）と同じ階層に `static` フォルダが存在する必要があります。標準的なデプロイプロセスでは問題ありませんが、Docker などを使用する場合は `COPY static/ ./static/` を忘れないようにしてください。
-- **Git**: `static` フォルダや `go.mod` がすべて Git にコミットされ、リモートリポジトリ（GitHubなど）にプッシュされていることを確認してください。
+```bash
+gcloud run deploy covered-people-visualizer \
+  --source . \
+  --region asia-northeast1 \
+  --allow-unauthenticated \
+  --set-secrets="MORALIS_API_KEY=moralis-api-key:latest"
+```
+
+### コマンドの解説
+- `--source .`: 現在のフォルダのコードを使ってビルド・デプロイします。
+- `--region asia-northeast1`: 東京リージョンを使います。
+- `--allow-unauthenticated`: 誰でもアクセスできるようにします（Web公開用）。
+- `--set-secrets`: 手順4で保存した `moralis-api-key` を読み込み、アプリ内で `MORALIS_API_KEY` という環境変数として使えるようにします。
+
+## 手順 6: 確認
+
+コマンドが完了すると、最後に URL が表示されます。
+
+```text
+Service [covered-people-visualizer] has been deployed and is serving 100 percent of traffic.
+Service URL: https://covered-people-visualizer-xxxxx-an.a.run.app
+```
+
+この URL をクリックして、アプリが正常に動作し、データが表示されることを確認してください。
+
+---
+
+## 更新したいときは？
+
+コードを修正して再デプロイしたい場合は、**手順 5 のコマンドをもう一度実行するだけ**です。
+
+```bash
+gcloud run deploy covered-people-visualizer --source . --region asia-northeast1
+```
+※ APIキーの設定などは引き継がれるので、オプションは省略できます。
