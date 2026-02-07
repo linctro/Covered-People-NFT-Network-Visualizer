@@ -225,16 +225,69 @@ canvas {
 
 /* Mobile Responsiveness */
 @media (max-width: 600px) {
+    #mobile-header {
+        display: flex !important; /* Override hidden */
+        justify-content: space-between;
+        align-items: center;
+        position: absolute;
+        top: 20px;
+        left: 20px;
+        right: 20px;
+        z-index: 20;
+        padding: 15px 20px;
+    }
+
+    #mobile-header h1 {
+        font-size: 1.2rem;
+        font-weight: 600;
+        margin: 0;
+    }
+
+    #btn-mobile-toggle {
+        background: none;
+        border: none;
+        color: var(--text-primary);
+        font-size: 1.2rem;
+        cursor: pointer;
+        transition: transform 0.3s ease;
+    }
+
+    #btn-mobile-toggle.rotated {
+        transform: rotate(180deg);
+    }
+
+    /* Hide Sidebar Main Title on Mobile as it's in the header now */
+    #sidebar h1 {
+        display: none;
+    }
+
     #sidebar {
         width: calc(100% - 40px);
-        top: auto;
-        bottom: 80px;
+        top: 80px; /* Below header */
+        left: 20px;
+        max-height: 0;
+        overflow: hidden;
+        padding-top: 0;
+        padding-bottom: 0;
+        border: none; /* Hide border when collapsed */
+        opacity: 0;
+        transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+        pointer-events: none;
+    }
+
+    #sidebar.sidebar-open {
+        max-height: 500px; /* Arbitrary large height */
+        padding: 20px;
+        border: 1px solid var(--glass-border);
+        opacity: 1;
+        pointer-events: auto;
     }
 
     #detail-panel {
         width: calc(100% - 40px);
-        top: 20px;
+        top: 80px; /* Below header */
         right: 20px;
+        left: 20px; /* Center it effectively */
     }
 }
 

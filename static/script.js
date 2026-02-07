@@ -912,6 +912,155 @@ function setupInteraction() {
     cbGenerative.onchange = (e) => {
         state.visibility.Generative = e.target.checked;
     };
+
+    // Mobile Header Toggle
+    const btnMobileToggle = document.getElementById('btn-mobile-toggle');
+    const sidebar = document.getElementById('sidebar');
+
+    if (btnMobileToggle && sidebar) {
+        btnMobileToggle.onclick = () => {
+            const isOpen = sidebar.classList.contains('sidebar-open');
+            if (isOpen) {
+                sidebar.classList.remove('sidebar-open');
+                btnMobileToggle.innerText = '▼';
+                // Remove rotated class if desired or just swap text
+            } else {
+                sidebar.classList.add('sidebar-open');
+                btnMobileToggle.innerText = '▲';
+            }
+        };
+    }
+
+    // --- Touch Support (Pinch Zoom & Pan) ---
+    let initialPinchDistance = null;
+    let lastTouchX = 0;
+    let lastTouchY = 0;
+
+    canvas.addEventListener('touchstart', e => {
+        if (e.touches.length === 1) {
+            // Single touch - Pan
+            state.isDragging = true;
+            lastTouchX = e.touches[0].clientX;
+            lastTouchY = e.touches[0].clientY;
+        } else if (e.touches.length === 2) {
+            // Two finger touch - Pinch Zoom
+            state.isDragging = false; // Disable drag during zoom
+            const dx = e.touches[0].clientX - e.touches[1].clientX;
+            const dy = e.touches[0].clientY - e.touches[1].clientY;
+            initialPinchDistance = Math.hypot(dx, dy);
+        }
+    }, { passive: false });
+
+    canvas.addEventListener('touchmove', e => {
+        e.preventDefault(); // Prevent scrolling
+
+        if (e.touches.length === 1 && state.isDragging) {
+            // Pan
+            const dx = e.touches[0].clientX - lastTouchX;
+            const dy = e.touches[0].clientY - lastTouchY;
+            state.transform.x += dx;
+            state.transform.y += dy;
+            lastTouchX = e.touches[0].clientX;
+            lastTouchY = e.touches[0].clientY;
+
+        } else if (e.touches.length === 2 && initialPinchDistance) {
+            // Pinch Zoom
+            const dx = e.touches[0].clientX - e.touches[1].clientX;
+            const dy = e.touches[0].clientY - e.touches[1].clientY;
+            const currentDistance = Math.hypot(dx, dy);
+
+            if (currentDistance > 0 && initialPinchDistance > 0) {
+                const zoomFactor = currentDistance / initialPinchDistance;
+                
+                // Center point between fingers
+                const centerX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+                const centerY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+
+                // Zoom towards center
+                // 1. Translate to origin relative to center
+                // 2. Scale
+                // 3. Translate back
+                // Simplified: adjust scale and compensate position
+                
+                // For simplicity in standard loop, we just apply scale relative to center of screen 
+                // or just modify scale directly. 
+                // A better approach for pinch is similar to wheel:
+                
+                const newScale = state.transform.scale * zoomFactor;
+                
+                // Limit zoom speed/jump
+                const limitedScale = Math.max(0.1, Math.min(5, newScale));
+                
+                // Reset distance for next move event (incremental zoom)
+                // Actually for smooth pinch, we usually compare to initial, but resetting allows constant factor updates
+                // Let's stick to incremental to match the wheel logic structure
+                // But touchmove fires rapidly, so we need small deltas.
+                // easier: update scale, reset initial distance.
+                
+                state.transform.scale = limitedScale;
+                initialPinchDistance = currentDistance;
+            }
+        }
+    }, { passive: false });
+
+    canvas.addEventListener('touchend', e => {
+        state.isDragging = false;
+        if (e.touches.length < 2) {
+            initialPinchDistance = null;
+        }
+    });
+
+    // Handle Tap on Nodes (Simulate Click)
+    // We can reuse the click handler if we ensure touch doesn't trigger ghost clicks or 
+    // explicitly handle it. The 'click' event often fires after tap on mobile.
+    // However, if we preventDefault in touchmove, it might cancel click.
+    // Let's check if we moved.
+    
+    // Actually, since we preventDefault on touchmove, 'click' might not fire.
+    // We should implement a simple tap detector.
+    let touchStartTime = 0;
+    canvas.addEventListener('touchstart', () => { touchStartTime = Date.now(); });
+    canvas.addEventListener('touchend', e => {
+        const duration = Date.now() - touchStartTime;
+        if (duration < 300 && !initialPinchDistance && !state.isDragging) {
+            // It was a tap. Manually trigger selection logic.
+            // But we need coordinates. ChangedTouches helps.
+            const touch = e.changedTouches[0];
+            const rect = canvas.getBoundingClientRect();
+            
+            // Re-run hit test logic from mousemove
+            const mx = (touch.clientX - rect.left - state.transform.x) / state.transform.scale;
+            const my = (touch.clientY - rect.top - state.transform.y) / state.transform.scale;
+            
+            let found = null;
+            // Iterate nodes... (copy logic or refactor hit test)
+            // Refactoring hit test would be cleaner but let's just copy loop for safety in this edit
+             for (let i = state.nodes.length - 1; i >= 0; i--) {
+                const node = state.nodes[i];
+                if (node.id !== 'issuer' && !state.visibility[node.nftType]) continue;
+
+                // Simple distance check in world space
+                 const dist = Math.hypot(node.x - mx, node.y - my);
+                 // Visual radius check
+                 // We need screen coords match
+                const screenX = (node.x * state.transform.scale) + state.transform.x;
+                const screenY = (node.y * state.transform.scale) + state.transform.y;
+                const screenDist = Math.hypot(screenX - (touch.clientX - rect.left), screenY - (touch.clientY - rect.top));
+                
+                if (screenDist < node.radius + 10) { // Larger hit area for touch
+                    found = node;
+                    break;
+                }
+            }
+
+            if (found) {
+                selectNode(found);
+            } else {
+                state.selectedNode = null;
+                document.getElementById('detail-panel').classList.add('hidden');
+            }
+        }
+    });
 }
 
 function selectNode(node) {
