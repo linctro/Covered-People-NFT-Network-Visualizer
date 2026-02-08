@@ -1,96 +1,86 @@
-# Google Cloud デプロイメントガイド (初心者向け)
+# Firebase デプロイガイド (Deployment Guide)
 
-Google Cloud が初めての方でも簡単にプロジェクトを公開できるよう、**Cloud Shell**（ブラウザ上で使えるターミナル）を使った手順をまとめました。これなら面倒なツールのインストールは不要です。
+Cloud RunからFirebase Hosting + Cloud Functionsへの移行手順です。
 
-## 前提条件
+## 1. Cloud Shell でのデプロイ手順 (Recommended)
 
-1.  **Google Cloud アカウント**を持っていること。
-2.  **プロジェクト**が作成されていること（まだの場合は [コンソール](https://console.cloud.google.com/) から「プロジェクトの作成」を行ってください）。
-3.  **Moralis API Key** が手元にあること。
+Google Cloud Shell を使うと、環境構築の手間なくデプロイできます。
+
+### ステップ 1: Cloud Shell を開く
+1. [Google Cloud Console](https://console.cloud.google.com/) にアクセスします。
+2. 右上のターミナルアイコン [< >_] をクリックして Cloud Shell を起動します。
+3. エディタモードを開くには「エディタを開く」ボタンをクリックします。
+
+### ステップ 2: ログイン (Headless Mode)
+Cloud Shell から Firebase にログインします。
+```bash
+firebase login --no-localhost
+```
+1. 表示されたURLをブラウザで開きます。
+2. Googleアカウントでログインし、許可します。
+3. 表示されたコードをコピーし、Cloud Shell に貼り付けます。
+
+### ステップ 3: プロジェクトの選択
+```bash
+firebase use --add
+```
+- デプロイ先のプロジェクトIDを選択し、エイリアス（例: `default`）を入力します。
+
+### ステップ 4: シークレットの設定
+Moralis APIキーを Cloud Secret Manager に保存します。
+```bash
+# YOUR_MORALIS_API_KEY を実際のキーに置き換えて実行
+printf "YOUR_MORALIS_API_KEY" | firebase functions:secrets:set MORALIS_API_KEY
+```
+
+### ステップ 5: 依存関係のインストール
+`functions` フォルダのライブラリをインストールします。
+```bash
+cd functions
+npm install
+cd ..
+```
+
+### ステップ 6: デプロイ
+```bash
+firebase deploy
+```
 
 ---
 
-## 手順 1: Cloud Shell を開く
+## ローカル環境でのデプロイ (Local Deployment)
 
-1.  [Google Cloud Console](https://console.cloud.google.com/) にアクセスします。
-2.  画面右上の **ターミナルアイコン**（[>_] のようなボタン）をクリックして「Cloud Shell」を起動します。
-3.  画面下部に黒い画面（ターミナル）が表示されます。
+ローカルPCからデプロイする場合の手順です。
 
-## 手順 2: コードをアップロードする
+### 1. 前提条件 (Prerequisites)
+- Node.js と Firebase CLI がインストールされていること。
+  ```bash
+  npm install -g firebase-tools
+  firebase login
+  ```
 
-Cloud Shell のエディタを使ってコードを作成するか、既存の Git リポジトリからクローンします。
-今回は、このプロジェクトのコードが既にある前提で進めます（Gitリポジトリ経由が一番簡単です）。
-
+### 2. 環境変数の設定
+Cloud Shell の手順と同様に、シークレットを設定します。
 ```bash
-# Gitリポジトリからクローンする場合（例）
-git clone <あなたのリポジトリURL>
-cd Covered-People-NFT-Network-Visualizer
+printf "YOUR_MORALIS_API_KEY" | firebase functions:secrets:set MORALIS_API_KEY
 ```
 
-※ もしローカルにあるファイルをアップロードしたい場合は、Cloud Shell ターミナルの右上にある「︙」メニューから「アップロード」を選んで、ファイル一式をアップロードしてください。
-
-## 手順 3: デプロイ準備（APIの有効化）
-
-Cloud Run と Secret Manager を使うための設定を有効にします。以下のコマンドを Cloud Shell でコピー＆ペーストして実行してください。
-
+### 3. デプロイ
 ```bash
-# プロジェクトIDを設定（your-project-id は実際のIDに置き換えてください）
-gcloud config set project your-project-id
-
-# 必要なサービスを有効化
-gcloud services enable run.googleapis.com \
-    secretmanager.googleapis.com \
-    cloudbuild.googleapis.com
+cd functions && npm install && cd ..
+firebase deploy
 ```
-
-## 手順 4: APIキーを安全に保存 (Secret Manager)
-
-APIキーをコードに直接書くのは危険なので、「Secret Manager」という金庫のような場所に保存します。
-
-1.  以下のコマンドを実行します。
-    ```bash
-    printf "あなたのMORALIS_API_KEYをここに貼り付け" | gcloud secrets create moralis-api-key --data-file=-
-    ```
-    ※ `あなたのMORALIS_API_KEY...` の部分を本物のキーに書き換えてから実行してください。
-
-2.  確認メッセージが出たら成功です。これでキーが `moralis-api-key` という名前でクラウド上に安全に保存されました。
-
-## 手順 5: Cloud Run へデプロイ
-
-いよいよアプリを公開します。1つのコマンドで完了します。
-
-```bash
-gcloud run deploy covered-people-visualizer \
-  --source . \
-  --region asia-northeast1 \
-  --allow-unauthenticated \
-  --set-secrets="MORALIS_API_KEY=moralis-api-key:latest"
-```
-
-### コマンドの解説
-- `--source .`: 現在のフォルダのコードを使ってビルド・デプロイします。
-- `--region asia-northeast1`: 東京リージョンを使います。
-- `--allow-unauthenticated`: 誰でもアクセスできるようにします（Web公開用）。
-- `--set-secrets`: 手順4で保存した `moralis-api-key` を読み込み、アプリ内で `MORALIS_API_KEY` という環境変数として使えるようにします。
-
-## 手順 6: 確認
-
-コマンドが完了すると、最後に URL が表示されます。
-
-```text
-Service [covered-people-visualizer] has been deployed and is serving 100 percent of traffic.
-Service URL: https://covered-people-visualizer-xxxxx-an.a.run.app
-```
-
-この URL をクリックして、アプリが正常に動作し、データが表示されることを確認してください。
 
 ---
 
-## 更新したいときは？
+## 動作確認 (Verification)
 
-コードを修正して再デプロイしたい場合は、**手順 5 のコマンドをもう一度実行するだけ**です。
+1. デプロイ完了後に表示される `Hosting URL` をクリックします。
+2. サイトが正常に読み込まれるか確認します。
+3. 開発者ツール (F12) の Network タブで、`/api/proxy` へのリクエストが成功 (Status 200) していることを確認します。
 
-```bash
-gcloud run deploy covered-people-visualizer --source . --region asia-northeast1
-```
-※ APIキーの設定などは引き継がれるので、オプションは省略できます。
+## トラブルシューティング
+
+- **Error: project not found**: `firebase use --add` で正しいプロジェクトを選択しているか確認してください。
+- **HTTP Error: 401/403**: `firebase login --reauth` で再ログインを試してください。
+- **500 Internal Server Error**: APIキーが正しく設定されていない可能性があります。Cloud Console の Cloud Functions ログを確認してください。
