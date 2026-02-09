@@ -1,6 +1,6 @@
 # Firebase デプロイガイド (Deployment Guide)
 
-Cloud RunからFirebase Hosting + Cloud Functionsへの移行手順です。
+Firebase Hosting + Cloud Functions を使って、このプロジェクトを公開する手順です。
 
 ## 1. Cloud Shell でのデプロイ手順 (Recommended)
 
@@ -16,15 +16,23 @@ Cloud Shell から Firebase にログインします。
 ```bash
 firebase login --no-localhost
 ```
-1. 表示されたURLをブラウザで開きます。
-2. Googleアカウントでログインし、許可します。
-3. 表示されたコードをコピーし、Cloud Shell に貼り付けます。
+1. 「Enable Gemini...」や「Allow Firebase to collect...」など、いくつか **(Y/n)** の質問が出ることがありますが、すべて **`y` または `n` を入力して Enter** で進めて大丈夫です。
+2. 最後に表示される「Visit this URL...」の下の長いURLをコピーし、ブラウザで開きます。
+3. Googleアカウントでログインし、許可します。
+4. ブラウザに表示されたコードをコピーし、Cloud Shell に貼り付けて Enter を押します。
 
 ### ステップ 3: プロジェクトの選択
 ```bash
 firebase use --add
 ```
 - デプロイ先のプロジェクトIDを選択し、エイリアス（例: `default`）を入力します。
+- **※ `Failed to get Firebase project` と出る場合**、以下の2点を確認してください：
+  1. [Firebase Console](https://console.firebase.google.com/) にアクセスし、プロジェクト `covered-people-nft-vi` が表示されているか。表示されていない場合は「プロジェクトを追加」から既存の GCP プロジェクトを選択して Firebase を有効にしてください。
+  2. `firebase login:list` を実行し、今使っているアカウントがプロジェクトの所有者であることを確認してください。
+- **※ もし `Error: Failed to list Firebase projects` と出る場合**、直接設定します：
+  ```bash
+  firebase use covered-people-nft-vi --alias default
+  ```
 
 ### ステップ 4: シークレットの設定
 Moralis APIキーを Cloud Secret Manager に保存します。
