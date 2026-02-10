@@ -155,7 +155,7 @@ function startIconAnimation() {
 }
 
 
-// --- Data Generation ---
+// --- Data Generation (Server-Side Cache) ---
 
 async function fetchRealData() {
     try {
@@ -174,30 +174,83 @@ async function fetchRealData() {
         };
         state.nodes.push(issuerNode);
 
-        // Run fetchers in parallel but they will update state incrementally
-        fetchGenesisHistory();
-        fetchGenerativeHistory();
+        // Fetch from Server Cache
+        console.log("Fetching data from server cache...");
+        updateProgress(10, "Loading Data from Server...");
+        
+        const response = await fetch('/api/nfts');
+        if (!response.ok) {
+            throw new Error(`Server error: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        const nodes = data.nodes || [];
 
-        // Handle title duration (10 seconds)
-        const minDuration = 10000; // 10 seconds
-        const elapsed = Date.now() - state.loading.titleStartTime;
-        const remaining = Math.max(0, minDuration - elapsed);
-
-        setTimeout(() => {
-            const screen = document.getElementById('loading-screen');
-            if (screen) {
-                screen.classList.add('fade-out');
-                state.loading.completed = true;
-
-                // Trigger icon animation immediately after loading screen fades
-                startIconAnimation();
-            }
-        }, remaining);
+        if (nodes.length === 0) {
+            console.warn("Server cache is empty.");
+            updateProgress(100, "No data available. Please wait for cache update.");
+        } else {
+            // Process all nodes
+            // We can process them in chunks to avoid UI freeze if there are many
+            // But 3500 is usually fine for modern JS engines.
+            // Let's use a small timeout loop or just process.
+            
+            let count = 0;
+            const total = nodes.length;
+            
+            // Limit the processing per frame to keep UI responsive
+            const processChunk = () => {
+                const chunkSize = 100;
+                const end = Math.min(count + chunkSize, total);
+                
+                for (let i = count; i < end; i++) {
+                    const item = nodes[i];
+                    const typeLabel = item._custom_type || 'Generative'; // Default to Generative if missing
+                    const color = typeLabel === 'Genesis' ? CONFIG.colors.genesis : CONFIG.colors.generative;
+                    
+                    // Add to visualization
+                    addNodeIncrementally(item, color, typeLabel);
+                }
+                
+                count = end;
+                updateProgress(10 + (count / total) * 90, `Processing ${count}/${total} events...`);
+                
+                if (count < total) {
+                    requestAnimationFrame(processChunk);
+                } else {
+                    finishLoading();
+                }
+            };
+            
+            requestAnimationFrame(processChunk);
+        }
 
     } catch (e) {
         console.error("Fatal Fetch Error:", e);
+        // Generate mock data if server fails? Or just show empty?
+        // Let's fall back to mock for demo purposes if it completely fails
         generateMockData();
+        finishLoading();
     }
+}
+
+function finishLoading() {
+    state.loading.completed = true;
+    state.loading.allDataLoaded = true;
+    updateStats();
+
+    // Handle title duration (10 seconds minimum)
+    const minDuration = 10000; 
+    const elapsed = Date.now() - state.loading.titleStartTime;
+    const remaining = Math.max(0, minDuration - elapsed);
+
+    setTimeout(() => {
+        const screen = document.getElementById('loading-screen');
+        if (screen) {
+            screen.classList.add('fade-out');
+            startIconAnimation();
+        }
+    }, remaining);
 }
 
 // Global lookup to manage path sorting per token incrementally
@@ -208,11 +261,10 @@ function addNodeIncrementally(tx, typeColor, typeLabel) {
     if (!tokenHistories[tokenId]) tokenHistories[tokenId] = [];
     tokenHistories[tokenId].push(tx);
 
-    // Sort history by time every time a new event for this token arrives
+    // Sort history by time
     tokenHistories[tokenId].sort((a, b) => new Date(a.block_timestamp) - new Date(b.block_timestamp));
 
-    // Re-generate nodes and edges for THIS TOKEN ONLY to keep it simple and efficient
-    // 1. Remove old nodes/edges for this token
+    // Re-generate nodes and edges for THIS TOKEN ONLY
     state.nodes = state.nodes.filter(n => n.token_id !== tokenId || n.type === 'issuer');
     state.edges = state.edges.filter(e =>
         (e.source.token_id !== tokenId && e.target.token_id !== tokenId) ||
@@ -261,7 +313,6 @@ function addNodeIncrementally(tx, typeColor, typeLabel) {
             to: event.to_address,
             image: event.custom_image,
             name: event.custom_name,
-            // Animation state
             opacity: 0,
             appearanceTime: Date.now()
         };
@@ -277,332 +328,7 @@ function addNodeIncrementally(tx, typeColor, typeLabel) {
         previousNode = node;
     });
 
-    // Update Stats
     updateStats();
-}
-
-function updateStats() {
-    const totalEvents = state.nodes.length - 1;
-    const totalEl = document.getElementById('stat-total-transfers');
-    if (totalEl) totalEl.textContent = totalEvents.toLocaleString();
-
-    // Unique NFT count calculation removed per user request
-
-    const statusText = state.loading.allDataLoaded ? " (Complete)" :
-        state.loading.fetchingMissing ? ` (Filling Gap: ${state.loading.missingLoaded}/${state.loading.missingTotal})` :
-            " (Loading History...)";
-    document.getElementById('stat-total-nfts').textContent = CONFIG.counts.total.toLocaleString() + statusText;
-}
-
-// 1. Fetch Genesis Data (Incremental)
-async function fetchGenesisHistory() {
-    try {
-        const response = await fetch('data/genesis_nfts.json');
-        if (!response.ok) throw new Error("Failed to load local JSON");
-        const targetList = await response.json();
-
-        const failedGenesisItems = [];
-        let processedCount = 0;
-        state.loading.failedGenesisItems = []; // Initialize for global state tracking
-
-        for (let i = 0; i < targetList.length; i++) {
-            const target = targetList[i];
-            const isPoly = target.token_address.toLowerCase().startsWith('0x2953');
-            const reqChain = isPoly ? 'polygon' : 'eth';
-
-            updateProgress(1, `Processing Genesis: ${target.name || target.token_id}`);
-
-            apiLimiter.add(async () => {
-                let success = false;
-                try {
-                    // 1. Try Transfers
-                    const body = {
-                        endpoint: `/nft/${target.token_address}/${target.token_id}/transfers`,
-                        params: { chain: reqChain, format: 'decimal', limit: '100' }
-                    };
-
-                    const apiRes = await fetchWithRetry('/api/proxy', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(body)
-                    });
-
-                    if (apiRes.ok) {
-                        const data = await apiRes.json();
-                        if (data.result && data.result.length > 0) {
-                            data.result.forEach(tx => {
-                                const enriched = {
-                                    ...tx,
-                                    custom_image: target.image_url,
-                                    custom_name: target.name,
-                                    is_genesis_target: true
-                                };
-                                addNodeIncrementally(enriched, CONFIG.colors.genesis, 'Genesis');
-                            });
-                            success = true;
-                        }
-                    }
-
-                    // 2. Fallback: Try Owners
-                    if (!success) {
-                        const ownerBody = {
-                            endpoint: `/nft/${target.token_address}/${target.token_id}/owners`,
-                            params: { chain: reqChain, format: 'decimal' }
-                        };
-                        const ownerRes = await fetchWithRetry('/api/proxy', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(ownerBody)
-                        });
-
-                        if (ownerRes.ok) {
-                            const ownerData = await ownerRes.json();
-                            if (ownerData.result && ownerData.result.length > 0) {
-                                const ownerInfo = ownerData.result[0];
-                                const pseudoTx = {
-                                    token_id: target.token_id,
-                                    transaction_hash: `genesis-fallback-${target.token_id}`,
-                                    block_timestamp: new Date('2022-01-01').toISOString(),
-                                    from_address: '0x0000000000000000000000000000000000000000',
-                                    to_address: ownerInfo.owner_of,
-                                    value: '0',
-                                    custom_image: target.image_url,
-                                    custom_name: target.name,
-                                    is_genesis_target: true
-                                };
-                                addNodeIncrementally(pseudoTx, CONFIG.colors.genesis, 'Genesis');
-                                success = true;
-                                console.log(`[Genesis] Recovered ${target.name} using Owner data.`);
-                            }
-                        }
-                    }
-
-                    if (!success) {
-                        console.warn(`[Genesis] Failed to fetch data for ${target.name || target.token_id}`);
-                        failedGenesisItems.push(target);
-                        state.loading.failedGenesisItems.push(target); // Update global state
-                    }
-
-                } catch (err) {
-                    console.error(`Error for ${target.name}:`, err);
-                    failedGenesisItems.push(target);
-                    state.loading.failedGenesisItems.push(target); // Update global state
-                } finally {
-                    processedCount++;
-                    // If this is the last item, print the summary
-                    if (processedCount === targetList.length) {
-                        if (failedGenesisItems.length > 0) {
-                            console.error("=== FAILED GENESIS LIST ===");
-                            console.table(failedGenesisItems.map(item => ({
-                                name: item.name,
-                                id: item.token_id,
-                                address: item.token_address
-                            })));
-                            console.error(`Total Failed Genesis: ${failedGenesisItems.length}`);
-                        } else {
-                            console.log("[Genesis] All items successfully loaded.");
-                        }
-                    }
-                }
-            });
-        }
-    } catch (e) {
-        console.error("Genesis Fetch Error:", e);
-    }
-}
-
-// 2. Fetch Generative Data (Incremental)
-async function fetchGenerativeHistory() {
-    let cursor = null;
-    let page = 1;
-
-    do {
-        const body = {
-            endpoint: `/nft/${CONFIG.contracts.generative}/transfers`,
-            params: { chain: 'eth', format: 'decimal', limit: '100' }
-        };
-        if (cursor) body.params.cursor = cursor;
-
-        try {
-            updateProgress(10, `Loading Generative History (Page ${page})...`);
-            const response = await fetch('/api/proxy', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body)
-            });
-            const data = await response.json();
-            if (data.result) {
-                data.result.forEach(tx => {
-                    addNodeIncrementally(tx, CONFIG.colors.generative, 'Generative');
-                });
-            }
-            cursor = data.cursor;
-            page++;
-            await new Promise(r => setTimeout(r, 200));
-        } catch (e) {
-            break;
-        }
-    } while (cursor && page <= 50); // Limit to 50 pages of history
-
-    // Discovery Phase: Fetch ALL tokens in contract
-    fetchGenerativeDiscovery();
-}
-
-// 3. New Discovery Phase: Fetch ALL NFTs in the contract
-async function fetchGenerativeDiscovery() {
-    state.loading.fetchingMissing = true;
-    updateStats();
-
-    console.log("[Discovery] Starting full contract scan...");
-
-    let cursor = null;
-    let page = 1;
-    let totalFound = 0;
-
-    // Existing IDs from History Phase
-    const existingIds = new Set();
-    state.nodes.forEach(n => {
-        if (n.nftType === 'Generative' && n.token_id) {
-            existingIds.add(n.token_id);
-        }
-    });
-
-    do {
-        const body = {
-            endpoint: `/nft/${CONFIG.contracts.generative}`,
-            params: { chain: 'eth', format: 'decimal', limit: '100' }
-        };
-        if (cursor) body.params.cursor = cursor;
-
-        apiLimiter.add(async () => {
-            try {
-                updateProgress(0, `Scanning Contract (Page ${page})...`);
-                const response = await fetchWithRetry('/api/proxy', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(body)
-                });
-
-                if (response.ok) {
-                    const data = await response.json();
-                    if (data.result) {
-                        data.result.forEach(nft => {
-                            totalFound++;
-                            // Only add if not already captured by history
-                            if (!existingIds.has(nft.token_id)) {
-                                // Create pseudo-transaction for visualization
-                                const pseudoTx = {
-                                    token_id: nft.token_id,
-                                    transaction_hash: `discovery-${nft.token_id}`,
-                                    block_timestamp: new Date('2022-11-22').toISOString(), // Fixed date: 2022-11-22
-                                    from_address: '0x0000000000000000000000000000000000000000',
-                                    to_address: nft.owner_of,
-                                    value: '0',
-                                    custom_name: nft.name || `CloneX #${nft.token_id}`,
-                                    custom_image: nft.metadata ? JSON.parse(nft.metadata).image : null
-                                };
-                                addNodeIncrementally(pseudoTx, CONFIG.colors.generative, 'Generative');
-                                existingIds.add(nft.token_id); // Mark as added
-                            }
-                        });
-                    }
-                    cursor = data.cursor; // Update cursor for outer loop? 
-                    // Note: Ideally cursor logic should be handled linearly or recursively inside the limiter task 
-                    // provided we don't spawn all page requests at once. 
-                    // BUT since we use a RateLimiter queue, we need to handle the cursor carefully.
-                    // The standard loop `do...while` here runs synchronously and submits jobs.
-                    // However, we rely on the `cursor` from the PREVIOUS fetch to form the NEXT request body.
-                    // Thus, we CANNOT use a simple `do..while` loop to queue jobs because we don't know the next cursor yet!
-                    // WE MUST RECURSE.
-                }
-            } catch (e) {
-                console.error("Discovery Error:", e);
-            }
-        });
-
-        // Wait for the specific job to complete? No, RateLimiter.add is fire-and-forget logic usually.
-        // We need a linear fetcher for pagination.
-
-        // Let's break the loop and use a recursive function instead
-        break;
-
-    } while (false);
-
-    // Actual Recursive Fetcher
-    const fetchPage = async (currentCursor) => {
-        const body = {
-            endpoint: `/nft/${CONFIG.contracts.generative}`,
-            params: { chain: 'eth', format: 'decimal', limit: '100' }
-        };
-        if (currentCursor) body.params.cursor = currentCursor;
-
-        try {
-            updateProgress(0, `Scanning (Page ${page}). Total Found: ${totalFound}`);
-
-            const response = await fetchWithRetry('/api/proxy', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body)
-            });
-
-            if (response.ok) {
-                const data = await response.json();
-                if (data.result) {
-                    data.result.forEach(nft => {
-                        totalFound++;
-                        if (!existingIds.has(nft.token_id)) {
-                            const pseudoTx = {
-                                token_id: nft.token_id,
-                                transaction_hash: `discovery-${nft.token_id}`,
-                                block_timestamp: new Date('2022-11-22').toISOString(), // Fixed date: 2022-11-22
-                                from_address: '0x0000000000000000000000000000000000000000',
-                                to_address: nft.owner_of,
-                                value: '0',
-                                // Metadata handling if available directly
-                                // metadata field is a string json
-                            };
-                            if (nft.metadata) {
-                                try {
-                                    const meta = JSON.parse(nft.metadata);
-                                    pseudoTx.custom_image = meta.image;
-                                } catch (e) { }
-                            }
-                            addNodeIncrementally(pseudoTx, CONFIG.colors.generative, 'Generative');
-                            existingIds.add(nft.token_id);
-                        }
-                    });
-                }
-
-                if (data.cursor) {
-                    page++;
-                    // Schedule next page with RateLimiter
-                    apiLimiter.add(() => fetchPage(data.cursor));
-                } else {
-                    console.log(`[Discovery] Complete. Total Unique Found: ${existingIds.size}`);
-
-                    // Final Gap Check for logging purposes
-                    const missing = [];
-                    for (let i = 1; i <= CONFIG.counts.generative; i++) {
-                        if (!existingIds.has(i.toString())) missing.push(i);
-                    }
-                    if (missing.length > 0) {
-                        console.warn(`[GapAnalysis] Expected ${CONFIG.counts.generative} items, but ${missing.length} are still missing.`, missing);
-                    } else {
-                        console.log("[GapAnalysis] All expected items accounted for.");
-                    }
-
-                    state.loading.allDataLoaded = true;
-                    state.loading.fetchingMissing = false;
-                    updateStats();
-                }
-            }
-        } catch (e) {
-            console.error("Discovery Page Error:", e);
-        }
-    };
-
-    // Kickoff
-    apiLimiter.add(() => fetchPage(null));
 }
 
 

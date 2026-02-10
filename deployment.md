@@ -6,10 +6,18 @@ Firebase Hosting + Cloud Functions を使って、このプロジェクトを公
 
 Google Cloud Shell を使うと、環境構築の手間なくデプロイできます。
 
-### ステップ 1: Cloud Shell を開く
+### ステップ 1: Cloud Shell を開いて最新化する
 1. [Google Cloud Console](https://console.cloud.google.com/) にアクセスします。
 2. 右上のターミナルアイコン [< >_] をクリックして Cloud Shell を起動します。
-3. エディタモードを開くには「エディタを開く」ボタンをクリックします。
+3. **重要：CLIを最新版に更新します**（エラー回避のため）:
+   ```bash
+   npm install -g firebase-tools
+   ```
+4. もし「Billing API...」というエラーが出る場合は、以下のコマンドでAPIを強制的に有効化します:
+   ```bash
+   gcloud services enable cloudbilling.googleapis.com
+   ```
+5. エディタモードを開くには「エディタを開く」ボタンをクリックします。
 
 ### ステップ 2: ログイン (Headless Mode)
 Cloud Shell から Firebase にログインします。
@@ -41,11 +49,11 @@ Moralis APIキーを Cloud Secret Manager に保存します。
 printf "YOUR_MORALIS_API_KEY" | firebase functions:secrets:set MORALIS_API_KEY
 ```
 
-### ステップ 5: 依存関係のインストール
-`functions` フォルダのライブラリをインストールします。
+### ステップ 5: 依存関係のインストール (Go)
+`functions` フォルダで Go モジュールの依存関係を確認します。
 ```bash
 cd functions
-npm install
+go mod tidy
 cd ..
 ```
 
@@ -53,6 +61,29 @@ cd ..
 ```bash
 firebase deploy
 ```
+
+### ステップ 7: キャッシュ更新ジョブの設定 (Cloud Scheduler)
+24時間に1回 `UpdateCache` 関数を実行するジョブを作成します。
+※ デプロイ後、GCPコンソールまたは以下のコマンドで設定します。
+
+```bash
+# Pub/Subトピックを作成 (まだなければ)
+gcloud pubsub topics create update-nft-cache
+
+# スケジューラを作成 (毎日午前9時 JST = UTC 0:00)
+gcloud scheduler jobs create pubsub update-nft-cache-job \
+  --schedule "0 0 * * *" \
+  --topic update-nft-cache \
+  --message-body "start" \
+  --time-zone "Asia/Tokyo"
+  
+# Cloud Functionのトリガー設定 (Eventarc/PubSub) はデプロイ時に反映されますが、
+# もし `UpdateCache` が Pub/Sub トリガーとして認識されていない場合は、
+# firebase.json または gcloud コマンドで明示的にデプロイする必要がある場合があります。
+```
+
+- **※ 「How many days do you want to keep container images...」と聞かれた場合**:
+  そのまま **Enter (または 1 を入力して Enter)** を押してください。これは古いビルドデータを自動で削除してストレージ料金を節約するための設定です。
 
 ---
 

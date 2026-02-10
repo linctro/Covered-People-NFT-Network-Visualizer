@@ -8,8 +8,8 @@
     ],
     "rewrites": [
       {
-        "source": "/api/proxy",
-        "function": "apiProxy"
+        "source": "/api/nfts",
+        "function": "GetNFTs"
       }
     ]
   },
