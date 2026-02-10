@@ -49,11 +49,11 @@ Moralis APIキーを Cloud Secret Manager に保存します。
 printf "YOUR_MORALIS_API_KEY" | firebase functions:secrets:set MORALIS_API_KEY
 ```
 
-### ステップ 5: 依存関係のインストール (Go)
-`functions` フォルダで Go モジュールの依存関係を確認します。
+### ステップ 5: 依存関係のインストール (Node.js)
+`functions` フォルダでライブラリをインストールします。
 ```bash
 cd functions
-go mod tidy
+npm install
 cd ..
 ```
 
@@ -63,8 +63,8 @@ firebase deploy
 ```
 
 ### ステップ 7: キャッシュ更新ジョブの設定 (Cloud Scheduler)
-24時間に1回 `UpdateCache` 関数を実行するジョブを作成します。
-※ デプロイ後、GCPコンソールまたは以下のコマンドで設定します。
+24時間に1回 `onUpdateCacheSchedule` 関数を実行するジョブを作成します。
+（すでに行っている場合はスキップまたは既存のジョブ内容を確認してください）
 
 ```bash
 # Pub/Subトピックを作成 (まだなければ)
@@ -76,11 +76,8 @@ gcloud scheduler jobs create pubsub update-nft-cache-job \
   --topic update-nft-cache \
   --message-body "start" \
   --time-zone "Asia/Tokyo"
-  
-# Cloud Functionのトリガー設定 (Eventarc/PubSub) はデプロイ時に反映されますが、
-# もし `UpdateCache` が Pub/Sub トリガーとして認識されていない場合は、
-# firebase.json または gcloud コマンドで明示的にデプロイする必要がある場合があります。
 ```
+
 
 - **※ 「How many days do you want to keep container images...」と聞かれた場合**:
   そのまま **Enter (または 1 を入力して Enter)** を押してください。これは古いビルドデータを自動で削除してストレージ料金を節約するための設定です。

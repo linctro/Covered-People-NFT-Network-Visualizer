@@ -9,12 +9,12 @@
     "rewrites": [
       {
         "source": "/api/nfts",
-        "function": "GetNFTs"
+        "function": "getNFTs"
       }
     ]
   },
   "functions": {
     "source": "functions",
-    "runtime": "go122"
+    "runtime": "nodejs20"
   }
 }
