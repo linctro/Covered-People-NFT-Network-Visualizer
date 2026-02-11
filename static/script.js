@@ -177,12 +177,12 @@ async function fetchRealData() {
         // Fetch from Server Cache
         console.log("Fetching data from server cache...");
         updateProgress(10, "Loading Data from Server...");
-        
+
         const response = await fetch('/api/nfts');
         if (!response.ok) {
             throw new Error(`Server error: ${response.status}`);
         }
-        
+
         const data = await response.json();
         const nodes = data.nodes || [];
 
@@ -194,34 +194,34 @@ async function fetchRealData() {
             // We can process them in chunks to avoid UI freeze if there are many
             // But 3500 is usually fine for modern JS engines.
             // Let's use a small timeout loop or just process.
-            
+
             let count = 0;
             const total = nodes.length;
-            
+
             // Limit the processing per frame to keep UI responsive
             const processChunk = () => {
                 const chunkSize = 100;
                 const end = Math.min(count + chunkSize, total);
-                
+
                 for (let i = count; i < end; i++) {
                     const item = nodes[i];
                     const typeLabel = item._custom_type || 'Generative'; // Default to Generative if missing
                     const color = typeLabel === 'Genesis' ? CONFIG.colors.genesis : CONFIG.colors.generative;
-                    
+
                     // Add to visualization
                     addNodeIncrementally(item, color, typeLabel);
                 }
-                
+
                 count = end;
                 updateProgress(10 + (count / total) * 90, `Processing ${count}/${total} events...`);
-                
+
                 if (count < total) {
                     requestAnimationFrame(processChunk);
                 } else {
                     finishLoading();
                 }
             };
-            
+
             requestAnimationFrame(processChunk);
         }
 
@@ -240,7 +240,7 @@ function finishLoading() {
     updateStats();
 
     // Handle title duration (10 seconds minimum)
-    const minDuration = 10000; 
+    const minDuration = 10000;
     const elapsed = Date.now() - state.loading.titleStartTime;
     const remaining = Math.max(0, minDuration - elapsed);
 
@@ -251,6 +251,24 @@ function finishLoading() {
             startIconAnimation();
         }
     }, remaining);
+}
+
+function updateStats() {
+    // Count unique token_ids (excluding 'issuer')
+    const uniqueTokens = new Set(
+        state.nodes
+            .filter(n => n.id !== 'issuer')
+            .map(n => n.token_id)
+    );
+
+    // Count total transfer events (nodes - 1 for issuer)
+    const totalEvents = Math.max(0, state.nodes.length - 1);
+
+    const elTotalNFTs = document.getElementById('stat-total-nfts');
+    const elTotalTransfers = document.getElementById('stat-total-transfers');
+
+    if (elTotalNFTs) elTotalNFTs.textContent = uniqueTokens.size.toLocaleString();
+    if (elTotalTransfers) elTotalTransfers.textContent = totalEvents.toLocaleString();
 }
 
 // Global lookup to manage path sorting per token incrementally
@@ -697,7 +715,7 @@ function setupInteraction() {
 
             if (currentDistance > 0 && initialPinchDistance > 0) {
                 const zoomFactor = currentDistance / initialPinchDistance;
-                
+
                 // Center point between fingers
                 const centerX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
                 const centerY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
@@ -707,22 +725,22 @@ function setupInteraction() {
                 // 2. Scale
                 // 3. Translate back
                 // Simplified: adjust scale and compensate position
-                
+
                 // For simplicity in standard loop, we just apply scale relative to center of screen 
                 // or just modify scale directly. 
                 // A better approach for pinch is similar to wheel:
-                
+
                 const newScale = state.transform.scale * zoomFactor;
-                
+
                 // Limit zoom speed/jump
                 const limitedScale = Math.max(0.1, Math.min(5, newScale));
-                
+
                 // Reset distance for next move event (incremental zoom)
                 // Actually for smooth pinch, we usually compare to initial, but resetting allows constant factor updates
                 // Let's stick to incremental to match the wheel logic structure
                 // But touchmove fires rapidly, so we need small deltas.
                 // easier: update scale, reset initial distance.
-                
+
                 state.transform.scale = limitedScale;
                 initialPinchDistance = currentDistance;
             }
@@ -741,7 +759,7 @@ function setupInteraction() {
     // explicitly handle it. The 'click' event often fires after tap on mobile.
     // However, if we preventDefault in touchmove, it might cancel click.
     // Let's check if we moved.
-    
+
     // Actually, since we preventDefault on touchmove, 'click' might not fire.
     // We should implement a simple tap detector.
     let touchStartTime = 0;
@@ -753,26 +771,26 @@ function setupInteraction() {
             // But we need coordinates. ChangedTouches helps.
             const touch = e.changedTouches[0];
             const rect = canvas.getBoundingClientRect();
-            
+
             // Re-run hit test logic from mousemove
             const mx = (touch.clientX - rect.left - state.transform.x) / state.transform.scale;
             const my = (touch.clientY - rect.top - state.transform.y) / state.transform.scale;
-            
+
             let found = null;
             // Iterate nodes... (copy logic or refactor hit test)
             // Refactoring hit test would be cleaner but let's just copy loop for safety in this edit
-             for (let i = state.nodes.length - 1; i >= 0; i--) {
+            for (let i = state.nodes.length - 1; i >= 0; i--) {
                 const node = state.nodes[i];
                 if (node.id !== 'issuer' && !state.visibility[node.nftType]) continue;
 
                 // Simple distance check in world space
-                 const dist = Math.hypot(node.x - mx, node.y - my);
-                 // Visual radius check
-                 // We need screen coords match
+                const dist = Math.hypot(node.x - mx, node.y - my);
+                // Visual radius check
+                // We need screen coords match
                 const screenX = (node.x * state.transform.scale) + state.transform.x;
                 const screenY = (node.y * state.transform.scale) + state.transform.y;
                 const screenDist = Math.hypot(screenX - (touch.clientX - rect.left), screenY - (touch.clientY - rect.top));
-                
+
                 if (screenDist < node.radius + 10) { // Larger hit area for touch
                     found = node;
                     break;
