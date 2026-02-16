@@ -109,7 +109,12 @@ exports.manualUpdateCache = onRequest(
       const apiKey = MORALIS_API_KEY.value();
       if (!apiKey) throw new Error("MORALIS_API_KEY not set");
 
-      const allNodes = await fetchAllFromMoralis(apiKey);
+      const stats = {
+        genesis: { total: 0, success: 0, errors: [] },
+        generative: { transfers: 0, discovery: 0, errors: [] }
+      };
+
+      const allNodes = await fetchAllFromMoralis(apiKey, stats);
 
       const condensedNodes = allNodes.map(n => ({
         token_id: n.token_id,
@@ -128,10 +133,14 @@ exports.manualUpdateCache = onRequest(
         last_update: admin.firestore.FieldValue.serverTimestamp()
       });
 
-      res.send(`Cache updated with ${condensedNodes.length} items.`);
+      res.json({
+        message: `Cache updated with ${condensedNodes.length} items.`,
+        stats,
+        nodesCount: condensedNodes.length
+      });
     } catch (e) {
       console.error(e);
-      res.status(500).send(e.message);
+      res.status(500).json({ error: e.message, stack: e.stack });
     }
   }
 );
@@ -139,7 +148,7 @@ exports.manualUpdateCache = onRequest(
 /**
  * Main Fetcher Logic
  */
-async function fetchAllFromMoralis(apiKey) {
+async function fetchAllFromMoralis(apiKey, stats = null) {
   let allNodes = [];
 
   // 1. Genesis NFTs
@@ -147,6 +156,8 @@ async function fetchAllFromMoralis(apiKey) {
   const genesisTargets = JSON.parse(fs.readFileSync(genesisPath, "utf-8"));
 
   console.log(`Processing ${genesisTargets.length} Genesis items...`);
+  if (stats) stats.genesis.total = genesisTargets.length;
+
   for (const target of genesisTargets) {
     const chain = target.token_address.toLowerCase() === OpenseaPoly ? "polygon" : "eth";
     let success = false;
@@ -196,7 +207,10 @@ async function fetchAllFromMoralis(apiKey) {
       }
     } catch (err) {
       console.warn(`Failed Genesis item ${target.name}:`, err.message);
+      if (stats && stats.genesis.errors.length < 10) stats.genesis.errors.push(`${target.name}: ${err.message}`);
     }
+
+    if (success && stats) stats.genesis.success++;
     await sleep(200); // Rate limit safety
   }
 
@@ -214,11 +228,13 @@ async function fetchAllFromMoralis(apiKey) {
         res.data.result.forEach(tx => {
           allNodes.push({ ...tx, _custom_type: "Generative" });
         });
+        if (stats) stats.generative.transfers += res.data.result.length;
       }
       cursor = res.data.cursor;
       await sleep(250);
     } catch (err) {
       console.error("Generative Transfer fetch error:", err.message);
+      if (stats) stats.generative.errors.push(`Transfers: ${err.message}`);
       break;
     }
   } while (cursor);
@@ -249,6 +265,7 @@ async function fetchAllFromMoralis(apiKey) {
               _custom_type: "Generative"
             });
             existingIds.add(nft.token_id);
+            if (stats) stats.generative.discovery++;
           }
         });
       }
@@ -256,6 +273,7 @@ async function fetchAllFromMoralis(apiKey) {
       await sleep(250);
     } catch (err) {
       console.error("Discovery fetch error:", err.message);
+      if (stats) stats.generative.errors.push(`Discovery: ${err.message}`);
       break;
     }
   } while (cursor);
