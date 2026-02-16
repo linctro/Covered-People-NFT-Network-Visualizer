@@ -96,6 +96,47 @@ exports.onUpdateCacheSchedule = onMessagePublished(
 );
 
 /**
+ * Manual Update Function (HTTP) - For debugging/initial population
+ */
+exports.manualUpdateCache = onRequest(
+  {
+    secrets: [MORALIS_API_KEY],
+    timeoutSeconds: 540,
+    memory: "512MiB",
+  },
+  async (req, res) => {
+    try {
+      const apiKey = MORALIS_API_KEY.value();
+      if (!apiKey) throw new Error("MORALIS_API_KEY not set");
+
+      const allNodes = await fetchAllFromMoralis(apiKey);
+
+      const condensedNodes = allNodes.map(n => ({
+        token_id: n.token_id,
+        transaction_hash: n.transaction_hash,
+        block_timestamp: n.block_timestamp,
+        from_address: n.from_address,
+        to_address: n.to_address,
+        custom_image: n.custom_image,
+        custom_name: n.custom_name,
+        is_genesis_target: n.is_genesis_target,
+        _custom_type: n._custom_type
+      }));
+
+      await db.collection("cache").doc("aoi_nfts").set({
+        nodes: condensedNodes,
+        last_update: admin.firestore.FieldValue.serverTimestamp()
+      });
+
+      res.send(`Cache updated with ${condensedNodes.length} items.`);
+    } catch (e) {
+      console.error(e);
+      res.status(500).send(e.message);
+    }
+  }
+);
+
+/**
  * Main Fetcher Logic
  */
 async function fetchAllFromMoralis(apiKey) {

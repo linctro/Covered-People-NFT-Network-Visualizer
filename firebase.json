@@ -10,6 +10,10 @@
       {
         "source": "/api/nfts",
         "function": "getNFTs"
+      },
+      {
+        "source": "/api/update-cache",
+        "function": "manualUpdateCache"
       }
     ]
   },

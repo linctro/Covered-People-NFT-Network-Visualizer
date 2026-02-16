@@ -180,7 +180,9 @@ async function fetchRealData() {
 
         const response = await fetch('/api/nfts');
         if (!response.ok) {
-            throw new Error(`Server error: ${response.status}`);
+            const errorText = await response.text();
+            console.error("API Error Details:", errorText);
+            throw new Error(`Server error: ${response.status} - ${errorText}`);
         }
 
         const data = await response.json();
