@@ -98,49 +98,43 @@ exports.onUpdateCacheSchedule = onMessagePublished(
 /**
  * Manual Update Function (HTTP) - For debugging/initial population
  */
+// Initialize PubSub client
+const { PubSub } = require('@google-cloud/pubsub');
+const pubsub = new PubSub();
+
+/**
+ * Manual Update Function (HTTP) - Triggers Background Job
+ * REASON: Direct execution via HTTP times out after 60s on Firebase Hosting.
+ * This function now just sends a "start" signal to the background worker.
+ */
 exports.manualUpdateCache = onRequest(
-  {
-    secrets: [MORALIS_API_KEY],
-    timeoutSeconds: 540,
-    memory: "512MiB",
-  },
   async (req, res) => {
     try {
-      const apiKey = MORALIS_API_KEY.value();
-      if (!apiKey) throw new Error("MORALIS_API_KEY not set");
+      const topicName = "update-nft-cache";
+      const dataBuffer = Buffer.from(JSON.stringify({ action: "manual_trigger" }));
 
-      const stats = {
-        genesis: { total: 0, success: 0, errors: [] },
-        generative: { transfers: 0, discovery: 0, errors: [] }
-      };
-
-      const allNodes = await fetchAllFromMoralis(apiKey, stats);
-
-      const condensedNodes = allNodes.map(n => ({
-        token_id: n.token_id,
-        transaction_hash: n.transaction_hash,
-        block_timestamp: n.block_timestamp,
-        from_address: n.from_address,
-        to_address: n.to_address,
-        custom_image: n.custom_image,
-        custom_name: n.custom_name,
-        is_genesis_target: n.is_genesis_target,
-        _custom_type: n._custom_type
-      }));
-
-      await db.collection("cache").doc("aoi_nfts").set({
-        nodes: condensedNodes,
-        last_update: admin.firestore.FieldValue.serverTimestamp()
-      });
-
-      res.json({
-        message: `Cache updated with ${condensedNodes.length} items.`,
-        stats,
-        nodesCount: condensedNodes.length
-      });
+      try {
+        await pubsub.topic(topicName).publishMessage({ data: dataBuffer });
+        res.json({
+          message: `Background update job triggered successfully.`,
+          detail: "Values will appear in about 1-2 minutes. Please refresh the main page then."
+        });
+      } catch (err) {
+        // If topic doesn't exist, try to create it (though deployment should have)
+        if (err.code === 5 || err.message.includes('NOT_FOUND')) {
+          await pubsub.createTopic(topicName);
+          await pubsub.topic(topicName).publishMessage({ data: dataBuffer });
+          res.json({
+            message: `Topic created and job triggered.`,
+            detail: "Please wait 1-2 minutes."
+          });
+        } else {
+          throw err;
+        }
+      }
     } catch (e) {
       console.error(e);
-      res.status(500).json({ error: e.message, stack: e.stack });
+      res.status(500).json({ error: e.message });
     }
   }
 );
