@@ -6,18 +6,21 @@ const axios = require("axios");
 const { defineSecret } = require("firebase-functions/params");
 const fs = require("fs");
 const path = require("path");
+const { PubSub } = require('@google-cloud/pubsub');
 
 admin.initializeApp();
 const db = admin.firestore();
+const pubsub = new PubSub();
 
 // Define the secret
 const MORALIS_API_KEY = defineSecret("MORALIS_API_KEY");
 
 // Constants
-const ContractIssuer = "0x91f5914A70C1F5d9fae0408aE16f1c19758337Eb".toLowerCase();
 const ContractGenerative = "0x0e6a70cb485ed3735fa2136e0d4adc4bf5456f93".toLowerCase();
-const OpenseaEth = "0x495f947276749ce646f68ac8c248420045cb7b5e".toLowerCase();
 const OpenseaPoly = "0x2953399124f0cbb46d2cbacd8a89cf0599974963".toLowerCase();
+const MASTER_COLLECTION = "cache/master_data/history";
+const META_DOC = "cache/master_data";
+const SERVING_DOC = "cache/serving_data";
 
 /**
  * Helper: Sleep to respect rate limits
@@ -25,7 +28,8 @@ const OpenseaPoly = "0x2953399124f0cbb46d2cbacd8a89cf0599974963".toLowerCase();
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * HTTP Function: Return cached NFTs from Firestore
+ * HTTP Function: Return cached NFTs from Firestore (Serving Layer)
+ * This now reads from the pre-aggregated serving document.
  */
 exports.getNFTs = onRequest(
   {
@@ -34,13 +38,32 @@ exports.getNFTs = onRequest(
   },
   async (req, res) => {
     try {
-      const doc = await db.collection("cache").doc("aoi_nfts").get();
+      const doc = await db.collection("cache").doc("serving_data").get();
       if (!doc.exists) {
         return res.status(404).send("Cache not initialized. Please wait for the first update.");
       }
 
+      const data = doc.data();
+      let nodes = [];
+
+      if (data.chunks && data.chunks > 1) {
+        // Load all chunks
+        const promises = [];
+        for (let i = 0; i < data.chunks; i++) {
+          promises.push(db.collection("cache").doc(`serving_data_chunk_${i}`).get());
+        }
+        const snapshots = await Promise.all(promises);
+        snapshots.forEach(snap => {
+          if (snap.exists && snap.data().nodes) {
+            nodes = nodes.concat(snap.data().nodes);
+          }
+        });
+      } else {
+        nodes = data.nodes || [];
+      }
+
       res.set("Cache-Control", "public, max-age=3600");
-      return res.status(200).json(doc.data());
+      return res.status(200).json({ nodes, last_updated: data.last_updated });
     } catch (error) {
       console.error("Firestore read error:", error);
       return res.status(500).send("Internal Server Error");
@@ -49,65 +72,10 @@ exports.getNFTs = onRequest(
 );
 
 /**
- * Pub/Sub Function: Triggered by Cloud Scheduler to update cache
- */
-exports.onUpdateCacheSchedule = onMessagePublished(
-  {
-    topic: "update-nft-cache",
-    secrets: [MORALIS_API_KEY],
-    timeoutSeconds: 540, // 9 minutes (max is usually around here for v2)
-    memory: "512MiB",
-  },
-  async (event) => {
-    console.log("Starting Cache Update...");
-    const apiKey = MORALIS_API_KEY.value();
-    if (!apiKey) throw new Error("MORALIS_API_KEY not set");
-
-    try {
-      const allNodes = await fetchAllFromMoralis(apiKey);
-      console.log(`Fetched ${allNodes.length} items. Saving to Firestore...`);
-
-      // Firestore limit is 1MB. 
-      // 3500 items might exceed this if we save full objects.
-      // We should strip unnecessary fields to be safe.
-      const condensedNodes = allNodes.map(n => ({
-        token_id: n.token_id,
-        transaction_hash: n.transaction_hash,
-        block_timestamp: n.block_timestamp,
-        from_address: n.from_address,
-        to_address: n.to_address,
-        custom_image: n.custom_image,
-        custom_name: n.custom_name,
-        is_genesis_target: n.is_genesis_target,
-        _custom_type: n._custom_type
-      }));
-
-      await db.collection("cache").doc("aoi_nfts").set({
-        nodes: condensedNodes,
-        last_update: admin.firestore.FieldValue.serverTimestamp()
-      });
-
-      console.log("Cache update complete.");
-    } catch (error) {
-      console.error("Cache update failed:", error);
-      throw error;
-    }
-  }
-);
-
-/**
- * Manual Update Function (HTTP) - For debugging/initial population
- */
-// Initialize PubSub client
-const { PubSub } = require('@google-cloud/pubsub');
-const pubsub = new PubSub();
-
-/**
- * Manual Update Function (HTTP) - Triggers Background Job
- * REASON: Direct execution via HTTP times out after 60s on Firebase Hosting.
- * This function now just sends a "start" signal to the background worker.
+ * Manual Update Function (HTTP) - Triggers Background Job via PubSub
  */
 exports.manualUpdateCache = onRequest(
+  { cors: true },
   async (req, res) => {
     try {
       const topicName = "update-nft-cache";
@@ -117,16 +85,15 @@ exports.manualUpdateCache = onRequest(
         await pubsub.topic(topicName).publishMessage({ data: dataBuffer });
         res.json({
           message: `Background update job triggered successfully.`,
-          detail: "Values will appear in about 1-2 minutes. Please refresh the main page then."
+          detail: "Values will appear in about 2-3 minutes. Please refresh the main page then."
         });
       } catch (err) {
-        // If topic doesn't exist, try to create it (though deployment should have)
         if (err.code === 5 || err.message.includes('NOT_FOUND')) {
           await pubsub.createTopic(topicName);
           await pubsub.topic(topicName).publishMessage({ data: dataBuffer });
           res.json({
             message: `Topic created and job triggered.`,
-            detail: "Please wait 1-2 minutes."
+            detail: "Please wait 2-3 minutes."
           });
         } else {
           throw err;
@@ -140,137 +107,236 @@ exports.manualUpdateCache = onRequest(
 );
 
 /**
- * Main Fetcher Logic
+ * Pub/Sub Function: Background Worker for Incremental Updates
  */
-async function fetchAllFromMoralis(apiKey, stats = null) {
+exports.onUpdateCacheSchedule = onMessagePublished(
+  {
+    topic: "update-nft-cache",
+    secrets: [MORALIS_API_KEY],
+    timeoutSeconds: 540, // 9 minutes
+    memory: "512MiB",
+  },
+  async (event) => {
+    console.log("Starting Incremental Cache Update...");
+    const apiKey = MORALIS_API_KEY.value();
+    if (!apiKey) throw new Error("MORALIS_API_KEY not set");
+
+    try {
+      // 1. Get Last Sync Date
+      const metaDoc = await db.doc(META_DOC).get();
+      let lastSync = "2022-01-01T00:00:00.000Z";
+
+      if (metaDoc.exists && metaDoc.data().last_sync_date) {
+        lastSync = metaDoc.data().last_sync_date;
+      }
+      console.log(`Last sync date: ${lastSync}`);
+
+      // 2. Fetch New Data (Incremental)
+      const newNodes = await fetchNewDataFromMoralis(apiKey, lastSync);
+      console.log(`Fetched ${newNodes.length} new items.`);
+
+      // 3. Save New Data to Master Collection (History)
+      if (newNodes.length > 0) {
+        await saveToMasterCollection(newNodes);
+      }
+
+      // 4. Generate Serving Data (Aggregation)
+      await generateServingData();
+
+      // 5. Update Last Sync Date
+      const now = new Date().toISOString();
+      await db.doc(META_DOC).set({ last_sync_date: now }, { merge: true });
+
+      console.log("Incremental update complete.");
+
+    } catch (error) {
+      console.error("Cache update failed:", error);
+      throw error;
+    }
+  }
+);
+
+async function fetchNewDataFromMoralis(apiKey, fromDate) {
   let allNodes = [];
 
-  // 1. Genesis NFTs
+  // 1. Genesis NFTs (Incremental)
   const genesisPath = path.join(__dirname, "genesis_nfts.json");
   const genesisTargets = JSON.parse(fs.readFileSync(genesisPath, "utf-8"));
 
-  console.log(`Processing ${genesisTargets.length} Genesis items...`);
-  if (stats) stats.genesis.total = genesisTargets.length;
-
   for (const target of genesisTargets) {
     const chain = target.token_address.toLowerCase() === OpenseaPoly ? "polygon" : "eth";
-    let success = false;
-
     try {
-      // Try Transfers
-      const transRes = await axios.get(`https://deep-index.moralis.io/api/v2/nft/${target.token_address}/${target.token_id}/transfers`, {
-        params: { chain, format: "decimal", limit: 100 },
-        headers: { "X-API-Key": apiKey }
-      });
-
-      if (transRes.data.result && transRes.data.result.length > 0) {
-        transRes.data.result.forEach(tx => {
-          allNodes.push({
-            ...tx,
-            custom_image: target.image_url,
-            custom_name: target.name,
-            is_genesis_target: true,
-            _custom_type: "Genesis"
-          });
-        });
-        success = true;
-      }
-
-      // Fallback: Owners
-      if (!success) {
-        const ownerRes = await axios.get(`https://deep-index.moralis.io/api/v2/nft/${target.token_address}/${target.token_id}/owners`, {
-          params: { chain, format: "decimal" },
-          headers: { "X-API-Key": apiKey }
-        });
-
-        if (ownerRes.data.result && ownerRes.data.result.length > 0) {
-          const owner = ownerRes.data.result[0];
-          allNodes.push({
-            token_id: target.token_id,
-            transaction_hash: `genesis-fallback-${target.token_id}`,
-            block_timestamp: "2022-01-01T00:00:00.000Z",
-            from_address: "0x0000000000000000000000000000000000000000",
-            to_address: owner.owner_of,
-            custom_image: target.image_url,
-            custom_name: target.name,
-            is_genesis_target: true,
-            _custom_type: "Genesis"
-          });
-          success = true;
-        }
-      }
-    } catch (err) {
-      console.warn(`Failed Genesis item ${target.name}:`, err.message);
-      if (stats && stats.genesis.errors.length < 10) stats.genesis.errors.push(`${target.name}: ${err.message}`);
-    }
-
-    if (success && stats) stats.genesis.success++;
-    await sleep(200); // Rate limit safety
-  }
-
-  // 2. Generative Transfers
-  console.log("Fetching Generative Transfers...");
-  let cursor = null;
-  do {
-    try {
-      const res = await axios.get(`https://deep-index.moralis.io/api/v2/nft/${ContractGenerative}/transfers`, {
-        params: { chain: "eth", format: "decimal", limit: 100, cursor },
+      const res = await axios.get(`https://deep-index.moralis.io/api/v2/nft/${target.token_address}/${target.token_id}/transfers`, {
+        params: { chain, format: "decimal", limit: 100, from_date: fromDate },
         headers: { "X-API-Key": apiKey }
       });
 
       if (res.data.result) {
         res.data.result.forEach(tx => {
-          allNodes.push({ ...tx, _custom_type: "Generative" });
+          allNodes.push(sanitize({
+            ...tx,
+            custom_image: target.image_url || null,
+            custom_name: target.name,
+            is_genesis_target: true,
+            _custom_type: "Genesis"
+          }));
         });
-        if (stats) stats.generative.transfers += res.data.result.length;
+      }
+      await sleep(200);
+    } catch (err) {
+      console.warn(`Genesis fetch error for ${target.name}:`, err.message);
+    }
+  }
+
+  // 2. Generative Transfers (Incremental)
+  let cursor = null;
+  do {
+    try {
+      const res = await axios.get(`https://deep-index.moralis.io/api/v2/nft/${ContractGenerative}/transfers`, {
+        params: { chain: "eth", format: "decimal", limit: 100, cursor, from_date: fromDate },
+        headers: { "X-API-Key": apiKey }
+      });
+
+      if (res.data.result) {
+        res.data.result.forEach(tx => {
+          allNodes.push(sanitize({ ...tx, _custom_type: "Generative" }));
+        });
       }
       cursor = res.data.cursor;
       await sleep(250);
     } catch (err) {
       console.error("Generative Transfer fetch error:", err.message);
-      if (stats) stats.generative.errors.push(`Transfers: ${err.message}`);
       break;
     }
   } while (cursor);
 
-  // 3. Generative Discovery (Full Contract Scan for missing owners)
-  console.log("Fetching Generative Discovery...");
-  const existingIds = new Set(allNodes.map(n => n.token_id));
-  cursor = null;
-  do {
-    try {
-      const res = await axios.get(`https://deep-index.moralis.io/api/v2/nft/${ContractGenerative}`, {
-        params: { chain: "eth", format: "decimal", limit: 100, cursor },
-        headers: { "X-API-Key": apiKey }
-      });
-
-      if (res.data.result) {
-        res.data.result.forEach(nft => {
-          if (!existingIds.has(nft.token_id)) {
-            const meta = nft.metadata ? JSON.parse(nft.metadata) : {};
-            allNodes.push({
-              token_id: nft.token_id,
-              transaction_hash: `discovery-${nft.token_id}`,
-              block_timestamp: "2022-11-22T00:00:00.000Z",
-              from_address: "0x0000000000000000000000000000000000000000",
-              to_address: nft.owner_of,
-              custom_name: nft.name || `CloneX #${nft.token_id}`,
-              custom_image: meta.image,
-              _custom_type: "Generative"
-            });
-            existingIds.add(nft.token_id);
-            if (stats) stats.generative.discovery++;
-          }
+  // 3. Metadata Discovery for new items
+  const newGenerativeIds = new Set(allNodes.filter(n => n._custom_type === 'Generative').map(n => n.token_id));
+  if (newGenerativeIds.size > 0) {
+    console.log(`Fetching metadata for ${newGenerativeIds.size} new tokens...`);
+    for (const tokenId of newGenerativeIds) {
+      try {
+        const res = await axios.get(`https://deep-index.moralis.io/api/v2/nft/${ContractGenerative}/${tokenId}`, {
+          params: { chain: "eth", format: "decimal" },
+          headers: { "X-API-Key": apiKey }
         });
+        const nft = res.data;
+        const meta = nft.metadata ? JSON.parse(nft.metadata) : {};
+
+        allNodes.push(sanitize({
+          token_id: nft.token_id,
+          transaction_hash: `meta-${nft.token_id}`,
+          block_timestamp: null,
+          from_address: "0x0000000000000000000000000000000000000000",
+          to_address: nft.owner_of,
+          custom_name: nft.name || `CloneX #${nft.token_id}`,
+          custom_image: meta.image || null,
+          _custom_type: "Generative",
+          is_metadata: true
+        }));
+        await sleep(200);
+      } catch (e) {
+        console.error(`Metadata fetch failed for ${tokenId}:`, e.message);
       }
-      cursor = res.data.cursor;
-      await sleep(250);
-    } catch (err) {
-      console.error("Discovery fetch error:", err.message);
-      if (stats) stats.generative.errors.push(`Discovery: ${err.message}`);
-      break;
     }
-  } while (cursor);
+  }
 
   return allNodes;
+}
+
+async function saveToMasterCollection(nodes) {
+  const batchSize = 400;
+  for (let i = 0; i < nodes.length; i += batchSize) {
+    const batch = db.batch();
+    const chunk = nodes.slice(i, i + batchSize);
+
+    chunk.forEach(node => {
+      const docId = `${node.token_id}_${node.transaction_hash}`;
+      const ref = db.collection(MASTER_COLLECTION).doc(docId); // cache/master_data/history/docId
+      batch.set(ref, node, { merge: true });
+    });
+
+    await batch.commit();
+    console.log(`Saved batch ${i / batchSize + 1}`);
+  }
+}
+
+function sanitize(obj) {
+  const clean = {};
+  Object.keys(obj).forEach(key => {
+    if (obj[key] === undefined) {
+      clean[key] = null;
+    } else {
+      clean[key] = obj[key];
+    }
+  });
+  return clean;
+}
+
+async function generateServingData() {
+  console.log("Generating serving data...");
+
+  // Read ALL docs from Master Collection (History)
+  const snapshot = await db.collection(MASTER_COLLECTION).get();
+
+  // Aggregate metadata
+  const metadataMap = {};
+  const nodes = [];
+
+  snapshot.forEach(doc => {
+    const data = doc.data();
+    if (data.is_metadata) {
+      metadataMap[data.token_id] = { image: data.custom_image, name: data.custom_name };
+    } else {
+      nodes.push(data);
+    }
+  });
+
+  // Merge metadata back into transfer nodes
+  nodes.forEach(node => {
+    if (metadataMap[node.token_id]) {
+      if (!node.custom_image) node.custom_image = metadataMap[node.token_id].image;
+      if (!node.custom_name) node.custom_name = metadataMap[node.token_id].name;
+    }
+  });
+
+  const jsonString = JSON.stringify({ nodes }); // simplistic size check
+  const sizeBytes = Buffer.byteLength(jsonString);
+  console.log(`Total serving data size: ${(sizeBytes / 1024 / 1024).toFixed(2)} MB`);
+
+  const MAX_SIZE = 900000; // ~900KB
+
+  // If small enough, single doc
+  if (sizeBytes < MAX_SIZE) {
+    await db.collection("cache").doc("serving_data").set({
+      nodes,
+      chunks: 1,
+      last_updated: new Date().toISOString()
+    });
+  } else {
+    // Chunk it
+    const chunkCount = Math.ceil(sizeBytes / MAX_SIZE);
+    const itemsPerChunk = Math.ceil(nodes.length / chunkCount);
+
+    // Firestore batch has a 500 operation limit, so we may need multiple batches
+    const allOps = [];
+    for (let c = 0; c < chunkCount; c++) {
+      const start = c * itemsPerChunk;
+      const end = start + itemsPerChunk;
+      const chunkNodes = nodes.slice(start, end);
+      allOps.push({ ref: db.collection("cache").doc(`serving_data_chunk_${c}`), data: { nodes: chunkNodes, index: c } });
+    }
+    // Main doc points to chunks
+    allOps.push({ ref: db.collection("cache").doc("serving_data"), data: { chunks: chunkCount, last_updated: new Date().toISOString() } });
+
+    // Write in batches of 450 (safely under 500 limit)
+    const BATCH_LIMIT = 450;
+    for (let i = 0; i < allOps.length; i += BATCH_LIMIT) {
+      const batch = db.batch();
+      const slice = allOps.slice(i, i + BATCH_LIMIT);
+      slice.forEach(op => batch.set(op.ref, op.data));
+      await batch.commit();
+    }
+    console.log(`Saved ${chunkCount} chunks.`);
+  }
 }
