@@ -72,36 +72,67 @@ exports.getNFTs = onRequest(
 );
 
 /**
- * Manual Update Function (HTTP) - Triggers Background Job via PubSub
+ * Manual Update Function (HTTP) - Directly executes the update logic
+ * This bypasses PubSub for reliability and easier debugging.
  */
 exports.manualUpdateCache = onRequest(
-  { cors: true },
+  {
+    cors: true,
+    secrets: [MORALIS_API_KEY],
+    timeoutSeconds: 540, // 9 minutes
+    memory: "512MiB",
+  },
   async (req, res) => {
+    console.log("manualUpdateCache: Starting direct update...");
     try {
-      const topicName = "update-nft-cache";
-      const dataBuffer = Buffer.from(JSON.stringify({ action: "manual_trigger" }));
-
-      try {
-        await pubsub.topic(topicName).publishMessage({ data: dataBuffer });
-        res.json({
-          message: `Background update job triggered successfully.`,
-          detail: "Values will appear in about 2-3 minutes. Please refresh the main page then."
-        });
-      } catch (err) {
-        if (err.code === 5 || err.message.includes('NOT_FOUND')) {
-          await pubsub.createTopic(topicName);
-          await pubsub.topic(topicName).publishMessage({ data: dataBuffer });
-          res.json({
-            message: `Topic created and job triggered.`,
-            detail: "Please wait 2-3 minutes."
-          });
-        } else {
-          throw err;
-        }
+      const apiKey = MORALIS_API_KEY.value();
+      if (!apiKey) {
+        return res.status(500).json({ error: "MORALIS_API_KEY is not set. Please run: printf 'YOUR_KEY' | firebase functions:secrets:set MORALIS_API_KEY" });
       }
-    } catch (e) {
-      console.error(e);
-      res.status(500).json({ error: e.message });
+      console.log("manualUpdateCache: API key loaded successfully.");
+
+      // 1. Get Last Sync Date
+      const metaDoc = await db.doc(META_DOC).get();
+      let lastSync = "2022-01-01T00:00:00.000Z";
+
+      if (metaDoc.exists && metaDoc.data().last_sync_date) {
+        lastSync = metaDoc.data().last_sync_date;
+      }
+      console.log(`manualUpdateCache: Last sync date: ${lastSync}`);
+
+      // 2. Fetch New Data (Incremental)
+      const newNodes = await fetchNewDataFromMoralis(apiKey, lastSync);
+      console.log(`manualUpdateCache: Fetched ${newNodes.length} new items.`);
+
+      // 3. Save New Data to Master Collection (History)
+      if (newNodes.length > 0) {
+        await saveToMasterCollection(newNodes);
+        console.log(`manualUpdateCache: Saved ${newNodes.length} items to master collection.`);
+      }
+
+      // 4. Generate Serving Data (Aggregation)
+      await generateServingData();
+
+      // 5. Update Last Sync Date
+      const now = new Date().toISOString();
+      await db.doc(META_DOC).set({ last_sync_date: now }, { merge: true });
+
+      console.log("manualUpdateCache: Incremental update complete.");
+      res.json({
+        success: true,
+        message: "Update completed successfully!",
+        new_items: newNodes.length,
+        last_sync: lastSync,
+        updated_at: now
+      });
+
+    } catch (error) {
+      console.error("manualUpdateCache: FAILED:", error);
+      res.status(500).json({
+        error: error.message,
+        stack: error.stack,
+        detail: "Check Cloud Functions logs for more information."
+      });
     }
   }
 );
