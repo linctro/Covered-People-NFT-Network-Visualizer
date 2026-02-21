@@ -12,6 +12,10 @@
         "function": "getNFTs"
       },
       {
+        "source": "/api/proxy",
+        "function": "moralisProxy"
+      },
+      {
         "source": "/api/update-cache",
         "function": "manualUpdateCache"
       }

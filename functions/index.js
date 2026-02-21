@@ -28,6 +28,26 @@ const SERVING_DOC = "cache/serving_data";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
+ * Helper: Axios request with retry and exponential backoff
+ */
+async function axiosWithRetry(config, retries = 3, backoff = 1000) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await axios(config);
+      return res;
+    } catch (err) {
+      const status = err.response ? err.response.status : 0;
+      if (attempt < retries && (status === 429 || status >= 500 || status === 0)) {
+        console.warn(`Retry ${attempt + 1}/${retries} for ${config.url} (status: ${status})`);
+        await sleep(backoff * Math.pow(2, attempt));
+      } else {
+        throw err;
+      }
+    }
+  }
+}
+
+/**
  * HTTP Function: Return cached NFTs from Firestore (Serving Layer)
  * This now reads from the pre-aggregated serving document.
  */
@@ -67,6 +87,52 @@ exports.getNFTs = onRequest(
     } catch (error) {
       console.error("Firestore read error:", error);
       return res.status(500).send("Internal Server Error");
+    }
+  }
+);
+
+/**
+ * HTTP Function: Proxy requests to Moralis API
+ * Used by frontend to fetch NFT metadata/images on demand.
+ */
+exports.moralisProxy = onRequest(
+  {
+    cors: true,
+    secrets: [MORALIS_API_KEY],
+    maxInstances: 10,
+  },
+  async (req, res) => {
+    try {
+      if (req.method !== 'POST') {
+        return res.status(405).json({ error: 'POST only' });
+      }
+
+      const apiKey = MORALIS_API_KEY.value();
+      if (!apiKey) {
+        return res.status(500).json({ error: 'MORALIS_API_KEY not set' });
+      }
+
+      const { endpoint, params } = req.body;
+      if (!endpoint) {
+        return res.status(400).json({ error: 'Missing endpoint in request body' });
+      }
+
+      // Only allow /nft/ endpoints for security
+      if (!endpoint.startsWith('/nft/')) {
+        return res.status(403).json({ error: 'Only /nft/ endpoints are allowed' });
+      }
+
+      const response = await axios.get(`https://deep-index.moralis.io/api/v2${endpoint}`, {
+        params: params || {},
+        headers: { 'X-API-Key': apiKey }
+      });
+
+      res.set('Cache-Control', 'public, max-age=86400'); // Cache for 24h
+      return res.status(200).json(response.data);
+    } catch (error) {
+      console.error('Proxy error:', error.message);
+      const status = error.response ? error.response.status : 500;
+      return res.status(status).json({ error: error.message });
     }
   }
 );
@@ -219,11 +285,15 @@ async function fetchNewDataFromMoralis(apiKey, fromDate) {
     }
   }
 
-  // 2. Generative Transfers (Incremental)
+  // 2. Generative Transfers (Incremental) - with retry
   let cursor = null;
+  let consecutiveErrors = 0;
+  const MAX_CONSECUTIVE_ERRORS = 3;
   do {
     try {
-      const res = await axios.get(`https://deep-index.moralis.io/api/v2/nft/${ContractGenerative}/transfers`, {
+      const res = await axiosWithRetry({
+        method: 'get',
+        url: `https://deep-index.moralis.io/api/v2/nft/${ContractGenerative}/transfers`,
         params: { chain: "eth", format: "decimal", limit: 100, cursor, from_date: fromDate },
         headers: { "X-API-Key": apiKey }
       });
@@ -234,10 +304,17 @@ async function fetchNewDataFromMoralis(apiKey, fromDate) {
         });
       }
       cursor = res.data.cursor;
+      consecutiveErrors = 0; // Reset on success
       await sleep(250);
     } catch (err) {
-      console.error("Generative Transfer fetch error:", err.message);
-      break;
+      consecutiveErrors++;
+      console.error(`Generative Transfer fetch error (${consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS}):`, err.message);
+      if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+        console.error("Too many consecutive errors, stopping Generative fetch.");
+        break;
+      }
+      // Skip this page and continue with next cursor if possible
+      await sleep(2000);
     }
   } while (cursor);
 
