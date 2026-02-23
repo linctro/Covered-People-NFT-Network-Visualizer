@@ -155,7 +155,74 @@ function startIconAnimation() {
 }
 
 
-// --- Data Generation (Server-Side Cache) ---
+// --- Data Generation (Server-Side Cache & Client-Side IndexedDB) ---
+
+const CACHE_DB_NAME = 'NftNetworkCacheDB';
+const CACHE_STORE_NAME = 'nftData';
+const CACHE_META_KEY = 'nft_cache_meta';
+const CACHE_MAX_AGE = 3600000; // 1 hour in milliseconds
+
+// Helper to open IndexedDB
+function openDB() {
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open(CACHE_DB_NAME, 1);
+        request.onupgradeneeded = (event) => {
+            const db = event.target.result;
+            if (!db.objectStoreNames.contains(CACHE_STORE_NAME)) {
+                db.createObjectStore(CACHE_STORE_NAME, { keyPath: 'id' });
+            }
+        };
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+// Save data to IndexedDB
+async function saveToIndexedDB(nodes, lastUpdated) {
+    try {
+        const db = await openDB();
+        const transaction = db.transaction(CACHE_STORE_NAME, 'readwrite');
+        const store = transaction.objectStore(CACHE_STORE_NAME);
+
+        // Clear old data and save new
+        store.clear();
+        store.put({ id: 'cache', nodes: nodes });
+
+        // Save metadata to localStorage for quick access
+        localStorage.setItem(CACHE_META_KEY, JSON.stringify({
+            lastUpdated: lastUpdated,
+            savedAt: Date.now()
+        }));
+    } catch (e) {
+        console.warn('Failed to save to IndexedDB:', e);
+    }
+}
+
+// Load data from IndexedDB
+async function loadFromIndexedDB() {
+    try {
+        const metaStr = localStorage.getItem(CACHE_META_KEY);
+        if (!metaStr) return null;
+
+        const meta = JSON.parse(metaStr);
+        const age = Date.now() - meta.savedAt;
+
+        // If cache is older than Max Age, consider it invalid
+        if (age > CACHE_MAX_AGE) return null;
+
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const transaction = db.transaction(CACHE_STORE_NAME, 'readonly');
+            const store = transaction.objectStore(CACHE_STORE_NAME);
+            const request = store.get('cache');
+            request.onsuccess = () => resolve(request.result ? { nodes: request.result.nodes, meta } : null);
+            request.onerror = () => reject(request.error);
+        });
+    } catch (e) {
+        console.warn('Failed to load from IndexedDB:', e);
+        return null;
+    }
+}
 
 async function fetchRealData() {
     try {
@@ -174,33 +241,48 @@ async function fetchRealData() {
         };
         state.nodes.push(issuerNode);
 
-        // Fetch from Server Cache
-        console.log("Fetching data from server cache...");
-        updateProgress(10, "Loading Data from Server...");
+        let nodes = [];
+        let timeLabel = '';
 
-        const response = await fetch('/api/nfts');
-        if (!response.ok) {
-            const errorText = await response.text();
-            console.error("API Error Details:", errorText);
-            throw new Error(`Server error: ${response.status} - ${errorText}`);
+        // 1. Try to load from Local Cache (IndexedDB)
+        console.log("Checking local IndexedDB cache...");
+        updateProgress(5, "Checking local cache...");
+        const cachedData = await loadFromIndexedDB();
+
+        if (cachedData && cachedData.nodes && cachedData.nodes.length > 0) {
+            console.log("Using cached data from IndexedDB.");
+            nodes = cachedData.nodes;
+            timeLabel = "Using Local Cache";
+            updateProgress(20, "Rendering from Local Cache...");
+        } else {
+            // 2. Fetch from Server API if no valid local cache
+            console.log("Fetching fresh data from server API...");
+            updateProgress(10, "Loading Data from Server...");
+
+            const response = await fetch('/api/nfts');
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error("API Error Details:", errorText);
+                throw new Error(`Server error: ${response.status} - ${errorText}`);
+            }
+
+            const data = await response.json();
+            nodes = data.nodes || [];
+
+            if (nodes.length > 0) {
+                // Save fetched data to Local Cache
+                await saveToIndexedDB(nodes, data.last_updated);
+            }
         }
 
-        const data = await response.json();
-        const nodes = data.nodes || [];
-
         if (nodes.length === 0) {
-            console.warn("Server cache is empty.");
+            console.warn("Server and Local cache are empty.");
             updateProgress(100, "No data available. Please wait for cache update.");
         } else {
-            // Process all nodes
-            // We can process them in chunks to avoid UI freeze if there are many
-            // But 3500 is usually fine for modern JS engines.
-            // Let's use a small timeout loop or just process.
-
+            // Process all nodes in chunks to avoid UI freeze
             let count = 0;
             const total = nodes.length;
 
-            // Limit the processing per frame to keep UI responsive
             const processChunk = () => {
                 const chunkSize = 100;
                 const end = Math.min(count + chunkSize, total);
@@ -215,7 +297,7 @@ async function fetchRealData() {
                 }
 
                 count = end;
-                updateProgress(10 + (count / total) * 90, `Processing ${count}/${total} events...`);
+                updateProgress(10 + (count / total) * 90, `Processing ${count}/${total} events... ${timeLabel}`);
 
                 if (count < total) {
                     requestAnimationFrame(processChunk);
@@ -229,8 +311,7 @@ async function fetchRealData() {
 
     } catch (e) {
         console.error("Fatal Fetch Error:", e);
-        // Generate mock data if server fails? Or just show empty?
-        // Let's fall back to mock for demo purposes if it completely fails
+        // Fall back to mock for demo purposes if it completely fails
         generateMockData();
         finishLoading();
     }

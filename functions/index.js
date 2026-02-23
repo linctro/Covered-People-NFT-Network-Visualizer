@@ -82,7 +82,7 @@ exports.getNFTs = onRequest(
         nodes = data.nodes || [];
       }
 
-      res.set("Cache-Control", "public, max-age=3600");
+      res.set("Cache-Control", "public, max-age=3600, s-maxage=86400");
       return res.status(200).json({ nodes, last_updated: data.last_updated });
     } catch (error) {
       console.error("Firestore read error:", error);
