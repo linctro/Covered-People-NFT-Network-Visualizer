@@ -1,0 +1,32 @@
+[
+  {
+    "name": "Generative",
+    "address": "0x0e6a70cb485ed3735fa2136e0d4adc4bf5456f93",
+    "chain": "eth",
+    "type": "Generative",
+    "fetchMetadata": true
+  },
+  {
+    "name": "離島ビール工房",
+    "address": "0x5d94faa2d2bf6a7c72a8d4925b931afd470e894e",
+    "chain": "polygon",
+    "type": "RitoBeer",
+    "fetchMetadata": true,
+    "filterUnsold": true
+  },
+  {
+    "name": "カバヨコ",
+    "address": "0xbe8ec65fe21314622a3e7ec4932c9236e83a6f47",
+    "chain": "polygon",
+    "type": "KabaYoko",
+    "fetchMetadata": true
+  },
+  {
+    "name": "カバード名札組",
+    "address": "0x7a91d5c6a2d55b888ddcddc44e3e113ef49852b8",
+    "chain": "polygon",
+    "type": "Nafuda",
+    "fetchMetadata": true,
+    "filterUnsold": true
+  }
+]

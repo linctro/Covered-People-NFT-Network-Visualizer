@@ -16,11 +16,27 @@ const pubsub = new PubSub();
 const MORALIS_API_KEY = defineSecret("MORALIS_API_KEY");
 
 // Constants
-const ContractGenerative = "0x0e6a70cb485ed3735fa2136e0d4adc4bf5456f93".toLowerCase();
 const OpenseaPoly = "0x2953399124f0cbb46d2cbacd8a89cf0599974963".toLowerCase();
 const MASTER_COLLECTION = "cache/master_data/history";
 const META_DOC = "cache/master_data";
 const SERVING_DOC = "cache/serving_data";
+const NULL_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+// Load collection configs
+const collections = JSON.parse(
+  fs.readFileSync(path.join(__dirname, "collections.json"), "utf-8")
+);
+
+/**
+ * Helper: Get API key with emulator fallback
+ */
+function getApiKey() {
+  try {
+    const val = MORALIS_API_KEY.value();
+    if (val) return val;
+  } catch (e) { /* emulator mode */ }
+  return process.env.MORALIS_API_KEY || null;
+}
 
 /**
  * Helper: Sleep to respect rate limits
@@ -256,7 +272,7 @@ exports.onUpdateCacheSchedule = onMessagePublished(
 async function fetchNewDataFromMoralis(apiKey, fromDate) {
   let allNodes = [];
 
-  // 1. Genesis NFTs (Incremental)
+  // 1. Genesis NFTs (Incremental) - individual token transfers
   const genesisPath = path.join(__dirname, "genesis_nfts.json");
   const genesisTargets = JSON.parse(fs.readFileSync(genesisPath, "utf-8"));
 
@@ -285,66 +301,89 @@ async function fetchNewDataFromMoralis(apiKey, fromDate) {
     }
   }
 
-  // 2. Generative Transfers (Incremental) - with retry
-  let cursor = null;
-  let consecutiveErrors = 0;
-  const MAX_CONSECUTIVE_ERRORS = 3;
-  do {
-    try {
-      const res = await axiosWithRetry({
-        method: 'get',
-        url: `https://deep-index.moralis.io/api/v2/nft/${ContractGenerative}/transfers`,
-        params: { chain: "eth", format: "decimal", limit: 100, cursor, from_date: fromDate },
-        headers: { "X-API-Key": apiKey }
-      });
+  // 2. Collection-based Transfers (Incremental) - loop through collections.json
+  for (const collection of collections) {
+    console.log(`Fetching transfers for ${collection.name} (${collection.chain})...`);
+    let cursor = null;
+    let consecutiveErrors = 0;
+    const MAX_CONSECUTIVE_ERRORS = 3;
 
-      if (res.data.result) {
-        res.data.result.forEach(tx => {
-          allNodes.push(sanitize({ ...tx, _custom_type: "Generative" }));
-        });
-      }
-      cursor = res.data.cursor;
-      consecutiveErrors = 0; // Reset on success
-      await sleep(250);
-    } catch (err) {
-      consecutiveErrors++;
-      console.error(`Generative Transfer fetch error (${consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS}):`, err.message);
-      if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-        console.error("Too many consecutive errors, stopping Generative fetch.");
-        break;
-      }
-      // Skip this page and continue with next cursor if possible
-      await sleep(2000);
-    }
-  } while (cursor);
-
-  // 3. Metadata Discovery for new items
-  const newGenerativeIds = new Set(allNodes.filter(n => n._custom_type === 'Generative').map(n => n.token_id));
-  if (newGenerativeIds.size > 0) {
-    console.log(`Fetching metadata for ${newGenerativeIds.size} new tokens...`);
-    for (const tokenId of newGenerativeIds) {
+    do {
       try {
-        const res = await axios.get(`https://deep-index.moralis.io/api/v2/nft/${ContractGenerative}/${tokenId}`, {
-          params: { chain: "eth", format: "decimal" },
+        const res = await axiosWithRetry({
+          method: 'get',
+          url: `https://deep-index.moralis.io/api/v2/nft/${collection.address}/transfers`,
+          params: { chain: collection.chain, format: "decimal", limit: 100, cursor, from_date: fromDate },
           headers: { "X-API-Key": apiKey }
         });
+
+        if (res.data.result) {
+          res.data.result.forEach(tx => {
+            allNodes.push(sanitize({
+              ...tx,
+              _custom_type: collection.type,
+              _collection_address: collection.address.toLowerCase()
+            }));
+          });
+        }
+        cursor = res.data.cursor;
+        consecutiveErrors = 0;
+        await sleep(250);
+      } catch (err) {
+        consecutiveErrors++;
+        console.error(`${collection.name} fetch error (${consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS}):`, err.message);
+        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+          console.error(`Too many errors, stopping ${collection.name} fetch.`);
+          break;
+        }
+        await sleep(2000);
+      }
+    } while (cursor);
+
+    console.log(`${collection.name}: fetched ${allNodes.filter(n => n._custom_type === collection.type).length} transfers.`);
+  }
+
+  // 3. Metadata Discovery for new items (all collections)
+  for (const collection of collections) {
+    if (!collection.fetchMetadata) continue;
+
+    const newIds = new Set(
+      allNodes
+        .filter(n => n._custom_type === collection.type && !n.is_metadata)
+        .map(n => n.token_id)
+    );
+
+    if (newIds.size === 0) continue;
+    console.log(`Fetching metadata for ${newIds.size} new ${collection.name} tokens...`);
+
+    for (const tokenId of newIds) {
+      try {
+        const res = await axios.get(
+          `https://deep-index.moralis.io/api/v2/nft/${collection.address}/${tokenId}`,
+          {
+            params: { chain: collection.chain, format: "decimal" },
+            headers: { "X-API-Key": apiKey }
+          }
+        );
         const nft = res.data;
-        const meta = nft.metadata ? JSON.parse(nft.metadata) : {};
+        let meta = {};
+        try { meta = nft.metadata ? JSON.parse(nft.metadata) : {}; } catch (e) { /* invalid JSON */ }
 
         allNodes.push(sanitize({
           token_id: nft.token_id,
-          transaction_hash: `meta-${nft.token_id}`,
+          transaction_hash: `meta-${collection.type}-${nft.token_id}`,
           block_timestamp: null,
-          from_address: "0x0000000000000000000000000000000000000000",
+          from_address: NULL_ADDRESS,
           to_address: nft.owner_of,
-          custom_name: nft.name || `CloneX #${nft.token_id}`,
+          custom_name: nft.name || `${collection.name} #${nft.token_id}`,
           custom_image: meta.image || null,
-          _custom_type: "Generative",
+          _custom_type: collection.type,
+          _collection_address: collection.address.toLowerCase(),
           is_metadata: true
         }));
         await sleep(200);
       } catch (e) {
-        console.error(`Metadata fetch failed for ${tokenId}:`, e.message);
+        console.error(`Metadata fetch failed for ${collection.name} #${tokenId}:`, e.message);
       }
     }
   }
@@ -387,26 +426,67 @@ async function generateServingData() {
   // Read ALL docs from Master Collection (History)
   const snapshot = await db.collection(MASTER_COLLECTION).get();
 
-  // Aggregate metadata
+  // Build lookup for filterUnsold collections
+  const filterUnsoldTypes = new Set(
+    collections.filter(c => c.filterUnsold).map(c => c.type)
+  );
+
+  // Aggregate metadata and transfers
   const metadataMap = {};
-  const nodes = [];
+  const allTransfers = [];
 
   snapshot.forEach(doc => {
     const data = doc.data();
     if (data.is_metadata) {
-      metadataMap[data.token_id] = { image: data.custom_image, name: data.custom_name };
+      const key = `${data._custom_type || 'Generative'}_${data.token_id}`;
+      metadataMap[key] = { image: data.custom_image, name: data.custom_name };
     } else {
-      nodes.push(data);
+      allTransfers.push(data);
     }
   });
 
   // Merge metadata back into transfer nodes
-  nodes.forEach(node => {
-    if (metadataMap[node.token_id]) {
-      if (!node.custom_image) node.custom_image = metadataMap[node.token_id].image;
-      if (!node.custom_name) node.custom_name = metadataMap[node.token_id].name;
+  allTransfers.forEach(node => {
+    const key = `${node._custom_type || 'Generative'}_${node.token_id}`;
+    if (metadataMap[key]) {
+      if (!node.custom_image) node.custom_image = metadataMap[key].image;
+      if (!node.custom_name) node.custom_name = metadataMap[key].name;
     }
   });
+
+  // Filter unsold NFTs: only include tokens that have at least one non-mint transfer
+  let nodes;
+  if (filterUnsoldTypes.size > 0) {
+    // Group transfers by (type + token_id) for filterUnsold collections
+    const tokenTransfers = {};
+    allTransfers.forEach(node => {
+      if (filterUnsoldTypes.has(node._custom_type)) {
+        const key = `${node._custom_type}_${node.token_id}`;
+        if (!tokenTransfers[key]) tokenTransfers[key] = [];
+        tokenTransfers[key].push(node);
+      }
+    });
+
+    // Find tokens that have been purchased (have non-mint transfers)
+    const soldTokens = new Set();
+    Object.entries(tokenTransfers).forEach(([key, transfers]) => {
+      const hasNonMintTransfer = transfers.some(
+        t => t.from_address && t.from_address.toLowerCase() !== NULL_ADDRESS
+      );
+      if (hasNonMintTransfer) soldTokens.add(key);
+    });
+
+    // Filter: keep all non-filterUnsold nodes + only sold filterUnsold nodes
+    nodes = allTransfers.filter(node => {
+      if (!filterUnsoldTypes.has(node._custom_type)) return true;
+      const key = `${node._custom_type}_${node.token_id}`;
+      return soldTokens.has(key);
+    });
+
+    console.log(`FilterUnsold: ${allTransfers.length} total → ${nodes.length} after filtering`);
+  } else {
+    nodes = allTransfers;
+  }
 
   const jsonString = JSON.stringify({ nodes }); // simplistic size check
   const sizeBytes = Buffer.byteLength(jsonString);
