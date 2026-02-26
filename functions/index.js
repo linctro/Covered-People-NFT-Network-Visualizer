@@ -242,6 +242,13 @@ exports.onUpdateCacheSchedule = onMessagePublished(
       if (metaDoc.exists && metaDoc.data().last_sync_date) {
         lastSync = metaDoc.data().last_sync_date;
       }
+
+      // Allow manual reset via query param
+      if (req.query.reset === "true") {
+        lastSync = "2022-01-01T00:00:00.000Z";
+        console.log("manualUpdateCache: Reset requested. Fetching full history from 2022.");
+      }
+
       console.log(`Last sync date: ${lastSync}`);
 
       // 2. Fetch New Data (Incremental)
