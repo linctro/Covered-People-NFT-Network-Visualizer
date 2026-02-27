@@ -668,466 +668,467 @@ function render() {
                 ctx.fill();
                 ctx.shadowBlur = 0;
             }
+        } // Close outer else
 
-            ctx.globalAlpha = 1.0; // Reset
+        ctx.globalAlpha = 1.0; // Reset
 
-            if (isSelected) {
-                ctx.lineWidth = 2;
-                ctx.strokeStyle = '#fff';
-                ctx.stroke();
-            }
-        }
-
-
-        ctx.restore();
-        requestAnimationFrame(render);
-    }
-
-    function drawRings(ctx) {
-        ctx.strokeStyle = CONFIG.colors.ring;
-        ctx.lineWidth = 1;
-
-        for (let year = CONFIG.years.start; year <= CONFIG.years.end; year++) {
-            const yearIndex = year - CONFIG.years.start;
-            const radius = CONFIG.radii.start + (yearIndex * CONFIG.radii.gap);
-
-            ctx.beginPath();
-            ctx.arc(0, 0, radius, 0, Math.PI * 2);
+        if (isSelected) {
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = '#fff';
             ctx.stroke();
-
-            ctx.fillStyle = 'rgba(255,255,255,0.3)';
-            ctx.font = '12px Inter';
-            ctx.fillText(year.toString(), 0, -radius + 15);
         }
     }
 
-    // --- Interaction ---
 
-    function setupInteraction() {
-        const canvas = state.canvas;
+    ctx.restore();
+    requestAnimationFrame(render);
+}
 
-        canvas.addEventListener('mousedown', e => {
-            state.isDragging = true;
+function drawRings(ctx) {
+    ctx.strokeStyle = CONFIG.colors.ring;
+    ctx.lineWidth = 1;
+
+    for (let year = CONFIG.years.start; year <= CONFIG.years.end; year++) {
+        const yearIndex = year - CONFIG.years.start;
+        const radius = CONFIG.radii.start + (yearIndex * CONFIG.radii.gap);
+
+        ctx.beginPath();
+        ctx.arc(0, 0, radius, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.fillStyle = 'rgba(255,255,255,0.3)';
+        ctx.font = '12px Inter';
+        ctx.fillText(year.toString(), 0, -radius + 15);
+    }
+}
+
+// --- Interaction ---
+
+function setupInteraction() {
+    const canvas = state.canvas;
+
+    canvas.addEventListener('mousedown', e => {
+        state.isDragging = true;
+        state.lastMouse = { x: e.clientX, y: e.clientY };
+    });
+
+    window.addEventListener('mouseup', () => {
+        state.isDragging = false;
+    });
+
+    canvas.addEventListener('mousemove', e => {
+        if (state.isDragging) {
+            const dx = e.clientX - state.lastMouse.x;
+            const dy = e.clientY - state.lastMouse.y;
+            state.transform.x += dx;
+            state.transform.y += dy;
             state.lastMouse = { x: e.clientX, y: e.clientY };
-        });
+        }
 
-        window.addEventListener('mouseup', () => {
-            state.isDragging = false;
-        });
+        const rect = canvas.getBoundingClientRect();
+        const mx = (e.clientX - rect.left - state.transform.x) / state.transform.scale;
+        const my = (e.clientY - rect.top - state.transform.y) / state.transform.scale;
 
-        canvas.addEventListener('mousemove', e => {
-            if (state.isDragging) {
-                const dx = e.clientX - state.lastMouse.x;
-                const dy = e.clientY - state.lastMouse.y;
-                state.transform.x += dx;
-                state.transform.y += dy;
-                state.lastMouse = { x: e.clientX, y: e.clientY };
+        let found = null;
+        for (let i = state.nodes.length - 1; i >= 0; i--) {
+            const node = state.nodes[i];
+
+            // Check visibility - Ignore hidden nodes for interaction
+            if (node.id !== 'issuer' && !state.visibility[node.nftType]) {
+                continue;
             }
 
+            const dist = Math.hypot(node.x - mx, node.y - my);
+
+            // Hit test radius should also respect the "Fixed Visual Size" logic?
+            // VISUAL radius on screen = node.radius.
+            // LOGICAL radius in world space = node.radius / scale.
+            // Wait, "dist" is in WORLD space (mx, my are world coords).
+            // So we check against logical radius: node.radius / state.transform.scale.
+            // Effectively, we want to know if the mouse is within N pixels of the node center ON SCREEN.
+
+            // Calculate screen distance
             const rect = canvas.getBoundingClientRect();
-            const mx = (e.clientX - rect.left - state.transform.x) / state.transform.scale;
-            const my = (e.clientY - rect.top - state.transform.y) / state.transform.scale;
+            const screenX = (node.x * state.transform.scale) + state.transform.x;
+            const screenY = (node.y * state.transform.scale) + state.transform.y;
+            const screenMx = e.clientX - rect.left;
+            const screenMy = e.clientY - rect.top;
+            const screenDist = Math.hypot(screenX - screenMx, screenY - screenMy);
+
+            // Check against base radius (visual size) + margin
+            if (screenDist < node.radius + 3) {
+                found = node;
+                break;
+            }
+        }
+
+        state.hoveredNode = found;
+        canvas.style.cursor = found ? 'pointer' : (state.isDragging ? 'grabbing' : 'grab');
+    });
+
+    canvas.addEventListener('wheel', e => {
+        e.preventDefault();
+        const zoomIntensity = 0.1;
+        const delta = e.deltaY < 0 ? 1 + zoomIntensity : 1 - zoomIntensity;
+
+        const rect = canvas.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+
+        const worldX = (mouseX - state.transform.x) / state.transform.scale;
+        const worldY = (mouseY - state.transform.y) / state.transform.scale;
+
+        state.transform.scale *= delta;
+        state.transform.scale = Math.max(0.1, Math.min(5, state.transform.scale));
+
+        state.transform.x = mouseX - worldX * state.transform.scale;
+        state.transform.y = mouseY - worldY * state.transform.scale;
+    }, { passive: false });
+
+    canvas.addEventListener('click', e => {
+        if (!state.isDragging && state.hoveredNode) {
+            selectNode(state.hoveredNode);
+        } else if (!state.isDragging && !state.hoveredNode) {
+            state.selectedNode = null;
+            document.getElementById('detail-panel').classList.add('hidden');
+        }
+    });
+
+    document.getElementById('btn-zoom-in').onclick = () => applyZoom(1.2);
+    document.getElementById('btn-zoom-out').onclick = () => applyZoom(0.8);
+    document.getElementById('btn-reset').onclick = resetView;
+    document.getElementById('btn-close-detail').onclick = () => {
+        state.selectedNode = null;
+        document.getElementById('detail-panel').classList.add('hidden');
+    };
+
+    // Toggle Filters
+    const cbGenesis = document.getElementById('cb-genesis');
+    const cbGenerative = document.getElementById('cb-generative');
+
+    cbGenesis.onchange = (e) => {
+        state.visibility.Genesis = e.target.checked;
+        // Don't need explicit re-render call because requestAnimationFrame loop handles it
+    };
+
+    cbGenerative.onchange = (e) => {
+        state.visibility.Generative = e.target.checked;
+    };
+
+    // New collection filters
+    const cbRitoBeer = document.getElementById('cb-ritobeer');
+    const cbKabaYoko = document.getElementById('cb-kabayoko');
+    const cbNafuda = document.getElementById('cb-nafuda');
+
+    if (cbRitoBeer) cbRitoBeer.onchange = (e) => { state.visibility.RitoBeer = e.target.checked; };
+    if (cbKabaYoko) cbKabaYoko.onchange = (e) => { state.visibility.KabaYoko = e.target.checked; };
+    if (cbNafuda) cbNafuda.onchange = (e) => { state.visibility.Nafuda = e.target.checked; };
+
+    // Mobile Header Toggle
+    const btnMobileToggle = document.getElementById('btn-mobile-toggle');
+    const sidebar = document.getElementById('sidebar');
+
+    if (btnMobileToggle && sidebar) {
+        btnMobileToggle.onclick = () => {
+            const isOpen = sidebar.classList.contains('sidebar-open');
+            if (isOpen) {
+                sidebar.classList.remove('sidebar-open');
+                btnMobileToggle.innerText = '▼';
+                // Remove rotated class if desired or just swap text
+            } else {
+                sidebar.classList.add('sidebar-open');
+                btnMobileToggle.innerText = '▲';
+            }
+        };
+    }
+
+    // --- Touch Support (Pinch Zoom & Pan) ---
+    let initialPinchDistance = null;
+    let lastTouchX = 0;
+    let lastTouchY = 0;
+
+    canvas.addEventListener('touchstart', e => {
+        if (e.touches.length === 1) {
+            // Single touch - Pan
+            state.isDragging = true;
+            lastTouchX = e.touches[0].clientX;
+            lastTouchY = e.touches[0].clientY;
+        } else if (e.touches.length === 2) {
+            // Two finger touch - Pinch Zoom
+            state.isDragging = false; // Disable drag during zoom
+            const dx = e.touches[0].clientX - e.touches[1].clientX;
+            const dy = e.touches[0].clientY - e.touches[1].clientY;
+            initialPinchDistance = Math.hypot(dx, dy);
+        }
+    }, { passive: false });
+
+    canvas.addEventListener('touchmove', e => {
+        e.preventDefault(); // Prevent scrolling
+
+        if (e.touches.length === 1 && state.isDragging) {
+            // Pan
+            const dx = e.touches[0].clientX - lastTouchX;
+            const dy = e.touches[0].clientY - lastTouchY;
+            state.transform.x += dx;
+            state.transform.y += dy;
+            lastTouchX = e.touches[0].clientX;
+            lastTouchY = e.touches[0].clientY;
+
+        } else if (e.touches.length === 2 && initialPinchDistance) {
+            // Pinch Zoom
+            const dx = e.touches[0].clientX - e.touches[1].clientX;
+            const dy = e.touches[0].clientY - e.touches[1].clientY;
+            const currentDistance = Math.hypot(dx, dy);
+
+            if (currentDistance > 0 && initialPinchDistance > 0) {
+                const zoomFactor = currentDistance / initialPinchDistance;
+
+                // Center point between fingers
+                const centerX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+                const centerY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+
+                // Zoom towards center
+                // 1. Translate to origin relative to center
+                // 2. Scale
+                // 3. Translate back
+                // Simplified: adjust scale and compensate position
+
+                // For simplicity in standard loop, we just apply scale relative to center of screen 
+                // or just modify scale directly. 
+                // A better approach for pinch is similar to wheel:
+
+                const newScale = state.transform.scale * zoomFactor;
+
+                // Limit zoom speed/jump
+                const limitedScale = Math.max(0.1, Math.min(5, newScale));
+
+                // Reset distance for next move event (incremental zoom)
+                // Actually for smooth pinch, we usually compare to initial, but resetting allows constant factor updates
+                // Let's stick to incremental to match the wheel logic structure
+                // But touchmove fires rapidly, so we need small deltas.
+                // easier: update scale, reset initial distance.
+
+                state.transform.scale = limitedScale;
+                initialPinchDistance = currentDistance;
+            }
+        }
+    }, { passive: false });
+
+    canvas.addEventListener('touchend', e => {
+        state.isDragging = false;
+        if (e.touches.length < 2) {
+            initialPinchDistance = null;
+        }
+    });
+
+    // Handle Tap on Nodes (Simulate Click)
+    // We can reuse the click handler if we ensure touch doesn't trigger ghost clicks or 
+    // explicitly handle it. The 'click' event often fires after tap on mobile.
+    // However, if we preventDefault in touchmove, it might cancel click.
+    // Let's check if we moved.
+
+    // Actually, since we preventDefault on touchmove, 'click' might not fire.
+    // We should implement a simple tap detector.
+    let touchStartTime = 0;
+    canvas.addEventListener('touchstart', () => { touchStartTime = Date.now(); });
+    canvas.addEventListener('touchend', e => {
+        const duration = Date.now() - touchStartTime;
+        if (duration < 300 && !initialPinchDistance && !state.isDragging) {
+            // It was a tap. Manually trigger selection logic.
+            // But we need coordinates. ChangedTouches helps.
+            const touch = e.changedTouches[0];
+            const rect = canvas.getBoundingClientRect();
+
+            // Re-run hit test logic from mousemove
+            const mx = (touch.clientX - rect.left - state.transform.x) / state.transform.scale;
+            const my = (touch.clientY - rect.top - state.transform.y) / state.transform.scale;
 
             let found = null;
+            // Iterate nodes... (copy logic or refactor hit test)
+            // Refactoring hit test would be cleaner but let's just copy loop for safety in this edit
             for (let i = state.nodes.length - 1; i >= 0; i--) {
                 const node = state.nodes[i];
+                if (node.id !== 'issuer' && !state.visibility[node.nftType]) continue;
 
-                // Check visibility - Ignore hidden nodes for interaction
-                if (node.id !== 'issuer' && !state.visibility[node.nftType]) {
-                    continue;
-                }
-
+                // Simple distance check in world space
                 const dist = Math.hypot(node.x - mx, node.y - my);
-
-                // Hit test radius should also respect the "Fixed Visual Size" logic?
-                // VISUAL radius on screen = node.radius.
-                // LOGICAL radius in world space = node.radius / scale.
-                // Wait, "dist" is in WORLD space (mx, my are world coords).
-                // So we check against logical radius: node.radius / state.transform.scale.
-                // Effectively, we want to know if the mouse is within N pixels of the node center ON SCREEN.
-
-                // Calculate screen distance
-                const rect = canvas.getBoundingClientRect();
+                // Visual radius check
+                // We need screen coords match
                 const screenX = (node.x * state.transform.scale) + state.transform.x;
                 const screenY = (node.y * state.transform.scale) + state.transform.y;
-                const screenMx = e.clientX - rect.left;
-                const screenMy = e.clientY - rect.top;
-                const screenDist = Math.hypot(screenX - screenMx, screenY - screenMy);
+                const screenDist = Math.hypot(screenX - (touch.clientX - rect.left), screenY - (touch.clientY - rect.top));
 
-                // Check against base radius (visual size) + margin
-                if (screenDist < node.radius + 3) {
+                if (screenDist < node.radius + 10) { // Larger hit area for touch
                     found = node;
                     break;
                 }
             }
 
-            state.hoveredNode = found;
-            canvas.style.cursor = found ? 'pointer' : (state.isDragging ? 'grabbing' : 'grab');
-        });
-
-        canvas.addEventListener('wheel', e => {
-            e.preventDefault();
-            const zoomIntensity = 0.1;
-            const delta = e.deltaY < 0 ? 1 + zoomIntensity : 1 - zoomIntensity;
-
-            const rect = canvas.getBoundingClientRect();
-            const mouseX = e.clientX - rect.left;
-            const mouseY = e.clientY - rect.top;
-
-            const worldX = (mouseX - state.transform.x) / state.transform.scale;
-            const worldY = (mouseY - state.transform.y) / state.transform.scale;
-
-            state.transform.scale *= delta;
-            state.transform.scale = Math.max(0.1, Math.min(5, state.transform.scale));
-
-            state.transform.x = mouseX - worldX * state.transform.scale;
-            state.transform.y = mouseY - worldY * state.transform.scale;
-        }, { passive: false });
-
-        canvas.addEventListener('click', e => {
-            if (!state.isDragging && state.hoveredNode) {
-                selectNode(state.hoveredNode);
-            } else if (!state.isDragging && !state.hoveredNode) {
+            if (found) {
+                selectNode(found);
+            } else {
                 state.selectedNode = null;
                 document.getElementById('detail-panel').classList.add('hidden');
             }
-        });
-
-        document.getElementById('btn-zoom-in').onclick = () => applyZoom(1.2);
-        document.getElementById('btn-zoom-out').onclick = () => applyZoom(0.8);
-        document.getElementById('btn-reset').onclick = resetView;
-        document.getElementById('btn-close-detail').onclick = () => {
-            state.selectedNode = null;
-            document.getElementById('detail-panel').classList.add('hidden');
-        };
-
-        // Toggle Filters
-        const cbGenesis = document.getElementById('cb-genesis');
-        const cbGenerative = document.getElementById('cb-generative');
-
-        cbGenesis.onchange = (e) => {
-            state.visibility.Genesis = e.target.checked;
-            // Don't need explicit re-render call because requestAnimationFrame loop handles it
-        };
-
-        cbGenerative.onchange = (e) => {
-            state.visibility.Generative = e.target.checked;
-        };
-
-        // New collection filters
-        const cbRitoBeer = document.getElementById('cb-ritobeer');
-        const cbKabaYoko = document.getElementById('cb-kabayoko');
-        const cbNafuda = document.getElementById('cb-nafuda');
-
-        if (cbRitoBeer) cbRitoBeer.onchange = (e) => { state.visibility.RitoBeer = e.target.checked; };
-        if (cbKabaYoko) cbKabaYoko.onchange = (e) => { state.visibility.KabaYoko = e.target.checked; };
-        if (cbNafuda) cbNafuda.onchange = (e) => { state.visibility.Nafuda = e.target.checked; };
-
-        // Mobile Header Toggle
-        const btnMobileToggle = document.getElementById('btn-mobile-toggle');
-        const sidebar = document.getElementById('sidebar');
-
-        if (btnMobileToggle && sidebar) {
-            btnMobileToggle.onclick = () => {
-                const isOpen = sidebar.classList.contains('sidebar-open');
-                if (isOpen) {
-                    sidebar.classList.remove('sidebar-open');
-                    btnMobileToggle.innerText = '▼';
-                    // Remove rotated class if desired or just swap text
-                } else {
-                    sidebar.classList.add('sidebar-open');
-                    btnMobileToggle.innerText = '▲';
-                }
-            };
         }
+    });
+}
 
-        // --- Touch Support (Pinch Zoom & Pan) ---
-        let initialPinchDistance = null;
-        let lastTouchX = 0;
-        let lastTouchY = 0;
+function selectNode(node) {
+    state.selectedNode = node;
 
-        canvas.addEventListener('touchstart', e => {
-            if (e.touches.length === 1) {
-                // Single touch - Pan
-                state.isDragging = true;
-                lastTouchX = e.touches[0].clientX;
-                lastTouchY = e.touches[0].clientY;
-            } else if (e.touches.length === 2) {
-                // Two finger touch - Pinch Zoom
-                state.isDragging = false; // Disable drag during zoom
-                const dx = e.touches[0].clientX - e.touches[1].clientX;
-                const dy = e.touches[0].clientY - e.touches[1].clientY;
-                initialPinchDistance = Math.hypot(dx, dy);
-            }
-        }, { passive: false });
+    const panel = document.getElementById('detail-panel');
+    const idEl = document.getElementById('detail-id');
+    const imgEl = document.getElementById('detail-image');
+    const imgPlaceholder = document.getElementById('detail-image-placeholder');
+    const tokenIdEl = document.getElementById('detail-token-id');
+    const typeEl = document.getElementById('detail-type');
+    const yearEl = document.getElementById('detail-year');
+    const dateEl = document.getElementById('detail-date');
+    const fromEl = document.getElementById('detail-from');
+    const toEl = document.getElementById('detail-to');
+    const scanEl = document.getElementById('detail-etherscan');
 
-        canvas.addEventListener('touchmove', e => {
-            e.preventDefault(); // Prevent scrolling
+    // Reset Image State
+    imgEl.src = '';
+    imgEl.classList.add('hidden');
+    imgPlaceholder.classList.remove('hidden');
+    imgPlaceholder.textContent = 'Loading Image...';
 
-            if (e.touches.length === 1 && state.isDragging) {
-                // Pan
-                const dx = e.touches[0].clientX - lastTouchX;
-                const dy = e.touches[0].clientY - lastTouchY;
-                state.transform.x += dx;
-                state.transform.y += dy;
-                lastTouchX = e.touches[0].clientX;
-                lastTouchY = e.touches[0].clientY;
+    if (node.id === 'issuer') {
+        idEl.textContent = 'Issuer Node';
+        imgPlaceholder.textContent = 'Issuer';
+        tokenIdEl.textContent = 'N/A';
+        dateEl.textContent = 'N/A';
+        fromEl.textContent = 'N/A';
+        toEl.textContent = 'N/A';
+        scanEl.classList.add('hidden');
+    } else {
+        idEl.textContent = `Event #${node.id.split('-').pop()}`;
 
-            } else if (e.touches.length === 2 && initialPinchDistance) {
-                // Pinch Zoom
-                const dx = e.touches[0].clientX - e.touches[1].clientX;
-                const dy = e.touches[0].clientY - e.touches[1].clientY;
-                const currentDistance = Math.hypot(dx, dy);
-
-                if (currentDistance > 0 && initialPinchDistance > 0) {
-                    const zoomFactor = currentDistance / initialPinchDistance;
-
-                    // Center point between fingers
-                    const centerX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
-                    const centerY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
-
-                    // Zoom towards center
-                    // 1. Translate to origin relative to center
-                    // 2. Scale
-                    // 3. Translate back
-                    // Simplified: adjust scale and compensate position
-
-                    // For simplicity in standard loop, we just apply scale relative to center of screen 
-                    // or just modify scale directly. 
-                    // A better approach for pinch is similar to wheel:
-
-                    const newScale = state.transform.scale * zoomFactor;
-
-                    // Limit zoom speed/jump
-                    const limitedScale = Math.max(0.1, Math.min(5, newScale));
-
-                    // Reset distance for next move event (incremental zoom)
-                    // Actually for smooth pinch, we usually compare to initial, but resetting allows constant factor updates
-                    // Let's stick to incremental to match the wheel logic structure
-                    // But touchmove fires rapidly, so we need small deltas.
-                    // easier: update scale, reset initial distance.
-
-                    state.transform.scale = limitedScale;
-                    initialPinchDistance = currentDistance;
-                }
-            }
-        }, { passive: false });
-
-        canvas.addEventListener('touchend', e => {
-            state.isDragging = false;
-            if (e.touches.length < 2) {
-                initialPinchDistance = null;
-            }
-        });
-
-        // Handle Tap on Nodes (Simulate Click)
-        // We can reuse the click handler if we ensure touch doesn't trigger ghost clicks or 
-        // explicitly handle it. The 'click' event often fires after tap on mobile.
-        // However, if we preventDefault in touchmove, it might cancel click.
-        // Let's check if we moved.
-
-        // Actually, since we preventDefault on touchmove, 'click' might not fire.
-        // We should implement a simple tap detector.
-        let touchStartTime = 0;
-        canvas.addEventListener('touchstart', () => { touchStartTime = Date.now(); });
-        canvas.addEventListener('touchend', e => {
-            const duration = Date.now() - touchStartTime;
-            if (duration < 300 && !initialPinchDistance && !state.isDragging) {
-                // It was a tap. Manually trigger selection logic.
-                // But we need coordinates. ChangedTouches helps.
-                const touch = e.changedTouches[0];
-                const rect = canvas.getBoundingClientRect();
-
-                // Re-run hit test logic from mousemove
-                const mx = (touch.clientX - rect.left - state.transform.x) / state.transform.scale;
-                const my = (touch.clientY - rect.top - state.transform.y) / state.transform.scale;
-
-                let found = null;
-                // Iterate nodes... (copy logic or refactor hit test)
-                // Refactoring hit test would be cleaner but let's just copy loop for safety in this edit
-                for (let i = state.nodes.length - 1; i >= 0; i--) {
-                    const node = state.nodes[i];
-                    if (node.id !== 'issuer' && !state.visibility[node.nftType]) continue;
-
-                    // Simple distance check in world space
-                    const dist = Math.hypot(node.x - mx, node.y - my);
-                    // Visual radius check
-                    // We need screen coords match
-                    const screenX = (node.x * state.transform.scale) + state.transform.x;
-                    const screenY = (node.y * state.transform.scale) + state.transform.y;
-                    const screenDist = Math.hypot(screenX - (touch.clientX - rect.left), screenY - (touch.clientY - rect.top));
-
-                    if (screenDist < node.radius + 10) { // Larger hit area for touch
-                        found = node;
-                        break;
-                    }
-                }
-
-                if (found) {
-                    selectNode(found);
-                } else {
-                    state.selectedNode = null;
-                    document.getElementById('detail-panel').classList.add('hidden');
-                }
-            }
-        });
-    }
-
-    function selectNode(node) {
-        state.selectedNode = node;
-
-        const panel = document.getElementById('detail-panel');
-        const idEl = document.getElementById('detail-id');
-        const imgEl = document.getElementById('detail-image');
-        const imgPlaceholder = document.getElementById('detail-image-placeholder');
-        const tokenIdEl = document.getElementById('detail-token-id');
-        const typeEl = document.getElementById('detail-type');
-        const yearEl = document.getElementById('detail-year');
-        const dateEl = document.getElementById('detail-date');
-        const fromEl = document.getElementById('detail-from');
-        const toEl = document.getElementById('detail-to');
-        const scanEl = document.getElementById('detail-etherscan');
-
-        // Reset Image State
-        imgEl.src = '';
-        imgEl.classList.add('hidden');
-        imgPlaceholder.classList.remove('hidden');
-        imgPlaceholder.textContent = 'Loading Image...';
-
-        if (node.id === 'issuer') {
-            idEl.textContent = 'Issuer Node';
-            imgPlaceholder.textContent = 'Issuer';
-            tokenIdEl.textContent = 'N/A';
-            dateEl.textContent = 'N/A';
-            fromEl.textContent = 'N/A';
-            toEl.textContent = 'N/A';
-            scanEl.classList.add('hidden');
+        if (node.image) {
+            // Use pre-loaded image from JSON
+            imgEl.src = node.image;
+            imgEl.classList.remove('hidden');
+            imgPlaceholder.classList.add('hidden');
         } else {
-            idEl.textContent = `Event #${node.id.split('-').pop()}`;
-
-            if (node.image) {
-                // Use pre-loaded image from JSON
-                imgEl.src = node.image;
-                imgEl.classList.remove('hidden');
-                imgPlaceholder.classList.add('hidden');
-            } else {
-                // Fetch Image independently (Lazy Load)
-                fetchNftImage(node).then(imageUrl => {
-                    if (state.selectedNode === node && imageUrl) {
-                        imgEl.src = imageUrl;
-                        imgEl.onload = () => {
-                            imgEl.classList.remove('hidden');
-                            imgPlaceholder.classList.add('hidden');
-                        };
-                    } else if (state.selectedNode === node) {
-                        imgPlaceholder.textContent = 'No Image';
-                    }
-                });
-            }
-
-            tokenIdEl.textContent = node.token_id || '?';
-
-            // Use custom name if available, otherwise just event ID
-            if (node.name) {
-                idEl.textContent = node.name;
-            }
-            dateEl.textContent = node.timestamp ? node.timestamp.split('T')[0] : 'Unknown';
-            fromEl.textContent = node.from ? `${node.from.substring(0, 6)}...${node.from.substring(38)}` : '-';
-            toEl.textContent = node.to ? `${node.to.substring(0, 6)}...${node.to.substring(38)}` : '-';
-
-            if (node.tx_hash) {
-                scanEl.href = `https://etherscan.io/tx/${node.tx_hash}`;
-                scanEl.classList.remove('hidden');
-            } else {
-                scanEl.classList.add('hidden');
-            }
-        }
-
-        typeEl.textContent = node.nftType;
-        yearEl.textContent = node.year;
-
-        panel.classList.remove('hidden');
-    }
-
-    // Helper: Resolve IPFS to Gateway
-    // Using Cloudflare IPFS gateway for better performance and reliability than public ipfs.io
-    function resolveIpfs(url) {
-        if (!url) return null;
-        if (url.startsWith('ipfs://')) {
-            return url.replace('ipfs://', 'https://cloudflare-ipfs.com/ipfs/');
-        }
-        return url;
-    }
-
-    // Async Fetch Image
-    async function fetchNftImage(node) {
-        try {
-            // Determine contract
-            let chain = 'eth';
-            let contract = CONFIG.contracts.openseaEth;
-
-            if (node.nftType === 'Generative') {
-                contract = CONFIG.contracts.generative;
-            } else if (node.nftType === 'Genesis') {
-                // Try Eth first
-            }
-
-            // Helper to try fetching metadata
-            const tryFetch = async (c, addr) => {
-                try {
-                    const body = {
-                        endpoint: `/nft/${addr}/${node.token_id}`,
-                        params: { chain: c, format: 'decimal' }
+            // Fetch Image independently (Lazy Load)
+            fetchNftImage(node).then(imageUrl => {
+                if (state.selectedNode === node && imageUrl) {
+                    imgEl.src = imageUrl;
+                    imgEl.onload = () => {
+                        imgEl.classList.remove('hidden');
+                        imgPlaceholder.classList.add('hidden');
                     };
-                    const res = await fetch('/api/proxy', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(body)
-                    });
-                    const data = await res.json();
+                } else if (state.selectedNode === node) {
+                    imgPlaceholder.textContent = 'No Image';
+                }
+            });
+        }
 
-                    // Moralis often returns a 'normalized_metadata' object or 'metadata' string.
-                    // We prioritize 'normalized_metadata.image' if available as it is often pre-processed.
-                    if (data.normalized_metadata && data.normalized_metadata.image) {
-                        return resolveIpfs(data.normalized_metadata.image);
-                    }
+        tokenIdEl.textContent = node.token_id || '?';
 
-                    if (data && data.metadata) {
-                        const meta = JSON.parse(data.metadata);
-                        return resolveIpfs(meta.image || meta.image_url || meta.animation_url);
-                    }
-                    return null;
-                } catch (e) { return null; }
-            };
+        // Use custom name if available, otherwise just event ID
+        if (node.name) {
+            idEl.textContent = node.name;
+        }
+        dateEl.textContent = node.timestamp ? node.timestamp.split('T')[0] : 'Unknown';
+        fromEl.textContent = node.from ? `${node.from.substring(0, 6)}...${node.from.substring(38)}` : '-';
+        toEl.textContent = node.to ? `${node.to.substring(0, 6)}...${node.to.substring(38)}` : '-';
 
-            let url = await tryFetch('eth', contract);
-
-            // If failed and it's Genesis, try Polygon
-            if (!url && node.nftType === 'Genesis') {
-                url = await tryFetch('polygon', CONFIG.contracts.openseaPoly);
-            }
-
-            return url;
-        } catch (e) {
-            console.error("Image Fetch Error:", e);
-            return null;
+        if (node.tx_hash) {
+            scanEl.href = `https://etherscan.io/tx/${node.tx_hash}`;
+            scanEl.classList.remove('hidden');
+        } else {
+            scanEl.classList.add('hidden');
         }
     }
 
-    function applyZoom(factor) {
-        state.transform.scale *= factor;
-        const cx = state.width / 2;
-        const cy = state.height / 2;
-        state.transform.x = cx + (state.transform.x - cx) * factor;
-        state.transform.y = cy + (state.transform.y - cy) * factor;
-    }
+    typeEl.textContent = node.nftType;
+    yearEl.textContent = node.year;
 
-    function resetView() {
-        state.transform.x = state.width / 2;
-        state.transform.y = state.height / 2;
-        state.transform.scale = 0.8;
-    }
+    panel.classList.remove('hidden');
+}
 
-    // --- Init ---
-    fetchRealData();
-    initCanvas();
+// Helper: Resolve IPFS to Gateway
+// Using Cloudflare IPFS gateway for better performance and reliability than public ipfs.io
+function resolveIpfs(url) {
+    if (!url) return null;
+    if (url.startsWith('ipfs://')) {
+        return url.replace('ipfs://', 'https://cloudflare-ipfs.com/ipfs/');
+    }
+    return url;
+}
+
+// Async Fetch Image
+async function fetchNftImage(node) {
+    try {
+        // Determine contract
+        let chain = 'eth';
+        let contract = CONFIG.contracts.openseaEth;
+
+        if (node.nftType === 'Generative') {
+            contract = CONFIG.contracts.generative;
+        } else if (node.nftType === 'Genesis') {
+            // Try Eth first
+        }
+
+        // Helper to try fetching metadata
+        const tryFetch = async (c, addr) => {
+            try {
+                const body = {
+                    endpoint: `/nft/${addr}/${node.token_id}`,
+                    params: { chain: c, format: 'decimal' }
+                };
+                const res = await fetch('/api/proxy', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                const data = await res.json();
+
+                // Moralis often returns a 'normalized_metadata' object or 'metadata' string.
+                // We prioritize 'normalized_metadata.image' if available as it is often pre-processed.
+                if (data.normalized_metadata && data.normalized_metadata.image) {
+                    return resolveIpfs(data.normalized_metadata.image);
+                }
+
+                if (data && data.metadata) {
+                    const meta = JSON.parse(data.metadata);
+                    return resolveIpfs(meta.image || meta.image_url || meta.animation_url);
+                }
+                return null;
+            } catch (e) { return null; }
+        };
+
+        let url = await tryFetch('eth', contract);
+
+        // If failed and it's Genesis, try Polygon
+        if (!url && node.nftType === 'Genesis') {
+            url = await tryFetch('polygon', CONFIG.contracts.openseaPoly);
+        }
+
+        return url;
+    } catch (e) {
+        console.error("Image Fetch Error:", e);
+        return null;
+    }
+}
+
+function applyZoom(factor) {
+    state.transform.scale *= factor;
+    const cx = state.width / 2;
+    const cy = state.height / 2;
+    state.transform.x = cx + (state.transform.x - cx) * factor;
+    state.transform.y = cy + (state.transform.y - cy) * factor;
+}
+
+function resetView() {
+    state.transform.x = state.width / 2;
+    state.transform.y = state.height / 2;
+    state.transform.scale = 0.8;
+}
+
+// --- Init ---
+fetchRealData();
+initCanvas();
