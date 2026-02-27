@@ -180,6 +180,13 @@ exports.manualUpdateCache = onRequest(
       if (metaDoc.exists && metaDoc.data().last_sync_date) {
         lastSync = metaDoc.data().last_sync_date;
       }
+
+      // Allow manual reset via query param to fetch full history
+      if (req.query.reset === "true") {
+        lastSync = "2022-01-01T00:00:00.000Z";
+        console.log("manualUpdateCache: Reset requested. Fetching full history from 2022.");
+      }
+
       console.log(`manualUpdateCache: Last sync date: ${lastSync}`);
 
       // 2. Fetch New Data (Incremental)
@@ -243,11 +250,7 @@ exports.onUpdateCacheSchedule = onMessagePublished(
         lastSync = metaDoc.data().last_sync_date;
       }
 
-      // Allow manual reset via query param
-      if (req.query.reset === "true") {
-        lastSync = "2022-01-01T00:00:00.000Z";
-        console.log("manualUpdateCache: Reset requested. Fetching full history from 2022.");
-      }
+      // Note: Pub/Sub functions don't have req object, no reset support here
 
       console.log(`Last sync date: ${lastSync}`);
 
