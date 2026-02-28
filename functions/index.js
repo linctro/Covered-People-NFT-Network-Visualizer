@@ -169,29 +169,34 @@ exports.manualUpdateCache = onRequest(
     try {
       const apiKey = MORALIS_API_KEY.value();
       if (!apiKey) {
-        return res.status(500).json({ error: "MORALIS_API_KEY is not set. Please run: printf 'YOUR_KEY' | firebase functions:secrets:set MORALIS_API_KEY" });
+        return res.status(500).json({ error: "MORALIS_API_KEY is not set." });
       }
-      console.log("manualUpdateCache: API key loaded successfully.");
       console.log(`manualUpdateCache: Loaded ${collections.length} collections: ${collections.map(c => c.name).join(', ')}`);
 
-      // 1. Get Last Sync Date
+      // 1. Get Per-Collection Sync Dates
       const metaDoc = await db.doc(META_DOC).get();
-      let lastSync = "2022-01-01T00:00:00.000Z";
+      const syncDates = (metaDoc.exists && metaDoc.data().sync_dates) || {};
+      const genesisSync = (metaDoc.exists && metaDoc.data().genesis_sync_date) || "2022-01-01T00:00:00.000Z";
 
-      if (metaDoc.exists && metaDoc.data().last_sync_date) {
-        lastSync = metaDoc.data().last_sync_date;
+      // Allow reset for a specific collection: ?reset=RitoBeer or ?reset=all
+      const resetTarget = req.query.reset || null;
+      if (resetTarget === "all") {
+        Object.keys(syncDates).forEach(k => delete syncDates[k]);
+        console.log("manualUpdateCache: Full reset requested.");
+      } else if (resetTarget && resetTarget !== "false") {
+        delete syncDates[resetTarget];
+        console.log(`manualUpdateCache: Reset requested for ${resetTarget}.`);
       }
 
-      // Allow manual reset via query param to fetch full history
-      if (req.query.reset === "true") {
-        lastSync = "2022-01-01T00:00:00.000Z";
-        console.log("manualUpdateCache: Reset requested. Fetching full history from 2022.");
-      }
+      // Log per-collection sync info
+      const syncInfo = {};
+      collections.forEach(c => {
+        syncInfo[c.type] = syncDates[c.type] || "NEW (2022-01-01)";
+      });
+      console.log("manualUpdateCache: Sync dates:", JSON.stringify(syncInfo));
 
-      console.log(`manualUpdateCache: Last sync date: ${lastSync}`);
-
-      // 2. Fetch New Data (Incremental)
-      const newNodes = await fetchNewDataFromMoralis(apiKey, lastSync);
+      // 2. Fetch New Data (Per-Collection Incremental)
+      const newNodes = await fetchNewDataFromMoralis(apiKey, syncDates, genesisSync);
       console.log(`manualUpdateCache: Fetched ${newNodes.length} new items.`);
 
       // 3. Save New Data to Master Collection (History)
@@ -203,11 +208,19 @@ exports.manualUpdateCache = onRequest(
       // 4. Generate Serving Data (Aggregation)
       await generateServingData();
 
-      // 5. Update Last Sync Date
+      // 5. Update Per-Collection Sync Dates (only for collections that were fetched)
       const now = new Date().toISOString();
-      await db.doc(META_DOC).set({ last_sync_date: now }, { merge: true });
-
-      console.log("manualUpdateCache: Incremental update complete.");
+      const fetchedTypes = new Set(newNodes.map(n => n._custom_type).filter(Boolean));
+      // Update sync date for collections that returned data, or that were attempted
+      collections.forEach(c => {
+        // Always update sync date so we don't re-fetch empty collections
+        syncDates[c.type] = now;
+      });
+      await db.doc(META_DOC).set({
+        sync_dates: syncDates,
+        genesis_sync_date: now,
+        last_sync_date: now // backward compat
+      }, { merge: true });
 
       // Per-collection breakdown
       const breakdown = {};
@@ -218,12 +231,12 @@ exports.manualUpdateCache = onRequest(
 
       res.json({
         success: true,
-        version: "multi-collection-v2",
+        version: "multi-collection-v3",
         message: "Update completed successfully!",
         collections_loaded: collections.map(c => c.name),
         new_items: newNodes.length,
         breakdown,
-        last_sync: lastSync,
+        sync_dates_used: syncInfo,
         updated_at: now
       });
 
@@ -254,36 +267,33 @@ exports.onUpdateCacheSchedule = onMessagePublished(
     if (!apiKey) throw new Error("MORALIS_API_KEY not set");
 
     try {
-      // 1. Get Last Sync Date
+      // 1. Get Per-Collection Sync Dates
       const metaDoc = await db.doc(META_DOC).get();
-      let lastSync = "2022-01-01T00:00:00.000Z";
+      const syncDates = (metaDoc.exists && metaDoc.data().sync_dates) || {};
+      const genesisSync = (metaDoc.exists && metaDoc.data().genesis_sync_date) || "2022-01-01T00:00:00.000Z";
 
-      if (metaDoc.exists && metaDoc.data().last_sync_date) {
-        lastSync = metaDoc.data().last_sync_date;
-      }
-
-      // Note: Pub/Sub functions don't have req object, no reset support here
-
-      console.log(`Last sync date: ${lastSync}`);
-
-      // 2. Fetch New Data (Incremental)
-      const newNodes = await fetchNewDataFromMoralis(apiKey, lastSync);
+      // 2. Fetch New Data (Per-Collection Incremental)
+      const newNodes = await fetchNewDataFromMoralis(apiKey, syncDates, genesisSync);
       console.log(`Fetched ${newNodes.length} new items.`);
 
-      // 3. Save New Data to Master Collection (History)
+      // 3. Save New Data
       if (newNodes.length > 0) {
         await saveToMasterCollection(newNodes);
       }
 
-      // 4. Generate Serving Data (Aggregation)
+      // 4. Generate Serving Data
       await generateServingData();
 
-      // 5. Update Last Sync Date
+      // 5. Update Per-Collection Sync Dates
       const now = new Date().toISOString();
-      await db.doc(META_DOC).set({ last_sync_date: now }, { merge: true });
+      collections.forEach(c => { syncDates[c.type] = now; });
+      await db.doc(META_DOC).set({
+        sync_dates: syncDates,
+        genesis_sync_date: now,
+        last_sync_date: now
+      }, { merge: true });
 
       console.log("Incremental update complete.");
-
     } catch (error) {
       console.error("Cache update failed:", error);
       throw error;
@@ -291,10 +301,13 @@ exports.onUpdateCacheSchedule = onMessagePublished(
   }
 );
 
-async function fetchNewDataFromMoralis(apiKey, fromDate) {
+async function fetchNewDataFromMoralis(apiKey, syncDates, genesisSync) {
+  const DEFAULT_FROM = "2022-01-01T00:00:00.000Z";
   let allNodes = [];
 
   // 1. Genesis NFTs (Incremental) - individual token transfers
+  const genesisFromDate = genesisSync || DEFAULT_FROM;
+  console.log(`Genesis: fetching from ${genesisFromDate}`);
   const genesisPath = path.join(__dirname, "genesis_nfts.json");
   const genesisTargets = JSON.parse(fs.readFileSync(genesisPath, "utf-8"));
 
@@ -302,7 +315,7 @@ async function fetchNewDataFromMoralis(apiKey, fromDate) {
     const chain = target.token_address.toLowerCase() === OpenseaPoly ? "polygon" : "eth";
     try {
       const res = await axios.get(`https://deep-index.moralis.io/api/v2/nft/${target.token_address}/${target.token_id}/transfers`, {
-        params: { chain, format: "decimal", limit: 100, from_date: fromDate },
+        params: { chain, format: "decimal", limit: 100, from_date: genesisFromDate },
         headers: { "X-API-Key": apiKey }
       });
 
@@ -323,9 +336,16 @@ async function fetchNewDataFromMoralis(apiKey, fromDate) {
     }
   }
 
-  // 2. Collection-based Transfers (Incremental) - loop through collections.json
-  for (const collection of collections) {
-    console.log(`Fetching transfers for ${collection.name} (${collection.chain})...`);
+  // 2. Collection-based Transfers - sorted: new collections first (no sync date)
+  const sortedCollections = [...collections].sort((a, b) => {
+    const aHasSync = syncDates[a.type] ? 1 : 0;
+    const bHasSync = syncDates[b.type] ? 1 : 0;
+    return aHasSync - bHasSync; // NEW (no sync) first
+  });
+
+  for (const collection of sortedCollections) {
+    const collectionFromDate = syncDates[collection.type] || DEFAULT_FROM;
+    console.log(`Fetching transfers for ${collection.name} (${collection.chain}) from ${collectionFromDate}...`);
     let cursor = null;
     let consecutiveErrors = 0;
     const MAX_CONSECUTIVE_ERRORS = 3;
@@ -335,7 +355,7 @@ async function fetchNewDataFromMoralis(apiKey, fromDate) {
         const res = await axiosWithRetry({
           method: 'get',
           url: `https://deep-index.moralis.io/api/v2/nft/${collection.address}/transfers`,
-          params: { chain: collection.chain, format: "decimal", limit: 100, cursor, from_date: fromDate },
+          params: { chain: collection.chain, format: "decimal", limit: 100, cursor, from_date: collectionFromDate },
           headers: { "X-API-Key": apiKey }
         });
 
