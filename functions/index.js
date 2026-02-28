@@ -172,6 +172,7 @@ exports.manualUpdateCache = onRequest(
         return res.status(500).json({ error: "MORALIS_API_KEY is not set. Please run: printf 'YOUR_KEY' | firebase functions:secrets:set MORALIS_API_KEY" });
       }
       console.log("manualUpdateCache: API key loaded successfully.");
+      console.log(`manualUpdateCache: Loaded ${collections.length} collections: ${collections.map(c => c.name).join(', ')}`);
 
       // 1. Get Last Sync Date
       const metaDoc = await db.doc(META_DOC).get();
@@ -207,10 +208,21 @@ exports.manualUpdateCache = onRequest(
       await db.doc(META_DOC).set({ last_sync_date: now }, { merge: true });
 
       console.log("manualUpdateCache: Incremental update complete.");
+
+      // Per-collection breakdown
+      const breakdown = {};
+      newNodes.forEach(n => {
+        const t = n._custom_type || 'Unknown';
+        breakdown[t] = (breakdown[t] || 0) + 1;
+      });
+
       res.json({
         success: true,
+        version: "multi-collection-v2",
         message: "Update completed successfully!",
+        collections_loaded: collections.map(c => c.name),
         new_items: newNodes.length,
+        breakdown,
         last_sync: lastSync,
         updated_at: now
       });
