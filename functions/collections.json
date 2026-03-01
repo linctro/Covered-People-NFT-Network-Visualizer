@@ -12,14 +12,15 @@
     "chain": "polygon",
     "type": "RitoBeer",
     "fetchMetadata": true,
-    "filterUnsold": true
+    "filterFromMint": true
   },
   {
     "name": "カバヨコ",
     "address": "0xbe8ec65fe21314622a3e7ec4932c9236e83a6f47",
     "chain": "polygon",
     "type": "KabaYoko",
-    "fetchMetadata": true
+    "fetchMetadata": true,
+    "filterFromMint": true
   },
   {
     "name": "カバード名札組",
@@ -27,6 +28,6 @@
     "chain": "polygon",
     "type": "Nafuda",
     "fetchMetadata": true,
-    "filterUnsold": true
+    "filterFromMint": true
   }
 ]

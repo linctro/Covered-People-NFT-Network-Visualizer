@@ -403,7 +403,7 @@ function addNodeIncrementally(tx, typeColor, typeLabel) {
     }
     const baseAngle = Math.abs(idHash % 360) * (Math.PI / 180);
 
-    const getYear = (ts) => ts ? parseInt(ts.substring(0, 4)) : 2022;
+    const getYear = (ts) => (ts && typeof ts === 'string') ? parseInt(ts.substring(0, 4)) : 2022;
     const getRadius = (timestamp) => {
         const date = new Date(timestamp);
         const year = date.getFullYear();

@@ -468,9 +468,12 @@ async function generateServingData() {
   // Read ALL docs from Master Collection (History)
   const snapshot = await db.collection(MASTER_COLLECTION).get();
 
-  // Build lookup for filterUnsold collections
-  const filterUnsoldTypes = new Set(
-    collections.filter(c => c.filterUnsold).map(c => c.type)
+  // Mint wallet address for filterFromMint collections
+  const MINT_WALLET = "0x115658e7f1d9bd343276453b826518028d40e2c6";
+
+  // Build lookup for filterFromMint collections
+  const filterFromMintTypes = new Set(
+    collections.filter(c => c.filterFromMint).map(c => c.type)
   );
 
   // Aggregate metadata and transfers
@@ -496,36 +499,37 @@ async function generateServingData() {
     }
   });
 
-  // Filter unsold NFTs: only include tokens that have at least one non-mint transfer
+  // Filter: only include tokens that have been transferred FROM the mint wallet
+  // Tokens that have never left the mint wallet are excluded
   let nodes;
-  if (filterUnsoldTypes.size > 0) {
-    // Group transfers by (type + token_id) for filterUnsold collections
+  if (filterFromMintTypes.size > 0) {
+    // Group transfers by (type + token_id) for filterFromMint collections
     const tokenTransfers = {};
     allTransfers.forEach(node => {
-      if (filterUnsoldTypes.has(node._custom_type)) {
+      if (filterFromMintTypes.has(node._custom_type)) {
         const key = `${node._custom_type}_${node.token_id}`;
         if (!tokenTransfers[key]) tokenTransfers[key] = [];
         tokenTransfers[key].push(node);
       }
     });
 
-    // Find tokens that have been purchased (have non-mint transfers)
-    const soldTokens = new Set();
+    // Find tokens that have been transferred FROM the mint wallet (= sold/distributed)
+    const distributedTokens = new Set();
     Object.entries(tokenTransfers).forEach(([key, transfers]) => {
-      const hasNonMintTransfer = transfers.some(
-        t => t.from_address && t.from_address.toLowerCase() !== NULL_ADDRESS
+      const hasLeftMintWallet = transfers.some(
+        t => t.from_address && t.from_address.toLowerCase() === MINT_WALLET
       );
-      if (hasNonMintTransfer) soldTokens.add(key);
+      if (hasLeftMintWallet) distributedTokens.add(key);
     });
 
-    // Filter: keep all non-filterUnsold nodes + only sold filterUnsold nodes
+    // Filter: keep all non-filterFromMint nodes + only distributed filterFromMint nodes
     nodes = allTransfers.filter(node => {
-      if (!filterUnsoldTypes.has(node._custom_type)) return true;
+      if (!filterFromMintTypes.has(node._custom_type)) return true;
       const key = `${node._custom_type}_${node.token_id}`;
-      return soldTokens.has(key);
+      return distributedTokens.has(key);
     });
 
-    console.log(`FilterUnsold: ${allTransfers.length} total → ${nodes.length} after filtering`);
+    console.log(`FilterFromMint: ${allTransfers.length} total → ${nodes.length} after filtering (mint wallet: ${MINT_WALLET})`);
   } else {
     nodes = allTransfers;
   }
