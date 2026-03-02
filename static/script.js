@@ -1054,28 +1054,52 @@ function selectNode(node) {
 // Using Cloudflare IPFS gateway for better performance and reliability than public ipfs.io
 function resolveIpfs(url) {
     if (!url) return null;
+    if (typeof url !== 'string') return url;
+
+    // Handle ipfs:// protocol
     if (url.startsWith('ipfs://')) {
-        return url.replace('ipfs://', 'https://cloudflare-ipfs.com/ipfs/');
+        return url.replace(/^ipfs:\/\/(ipfs\/)?/, 'https://cloudflare-ipfs.com/ipfs/');
     }
+
+    // Handle ipfs.io or other gateways already in the URL
+    if (url.includes('/ipfs/')) {
+        const hash = url.split('/ipfs/')[1];
+        return 'https://cloudflare-ipfs.com/ipfs/' + hash;
+    }
+
     return url;
 }
 
 // Async Fetch Image
 async function fetchNftImage(node) {
     try {
-        // Determine contract
+        // Determine contract and chain
         let chain = 'eth';
-        let contract = CONFIG.contracts.openseaEth;
+        let contract = null;
 
         if (node.nftType === 'Generative') {
             contract = CONFIG.contracts.generative;
+            chain = 'eth';
         } else if (node.nftType === 'Genesis') {
-            // Try Eth first
+            contract = CONFIG.contracts.openseaEth; // Try Eth first
+            chain = 'eth';
+        } else if (node.nftType === 'RitoBeer') {
+            contract = CONFIG.contracts.ritoBeer;
+            chain = 'polygon';
+        } else if (node.nftType === 'KabaYoko') {
+            contract = CONFIG.contracts.kabaYoko;
+            chain = 'polygon';
+        } else if (node.nftType === 'Nafuda') {
+            contract = CONFIG.contracts.nafuda;
+            chain = 'polygon';
         }
+
+        if (!contract) return null;
 
         // Helper to try fetching metadata
         const tryFetch = async (c, addr) => {
             try {
+                console.log(`Fetching metadata for ${node.nftType} #${node.token_id} on ${c}...`);
                 const body = {
                     endpoint: `/nft/${addr}/${node.token_id}`,
                     params: { chain: c, format: 'decimal' }
@@ -1085,26 +1109,30 @@ async function fetchNftImage(node) {
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(body)
                 });
+
+                if (!res.ok) return null;
                 const data = await res.json();
 
                 // Moralis often returns a 'normalized_metadata' object or 'metadata' string.
-                // We prioritize 'normalized_metadata.image' if available as it is often pre-processed.
                 if (data.normalized_metadata && data.normalized_metadata.image) {
                     return resolveIpfs(data.normalized_metadata.image);
                 }
 
                 if (data && data.metadata) {
-                    const meta = JSON.parse(data.metadata);
+                    const meta = typeof data.metadata === 'string' ? JSON.parse(data.metadata) : data.metadata;
                     return resolveIpfs(meta.image || meta.image_url || meta.animation_url);
                 }
                 return null;
-            } catch (e) { return null; }
+            } catch (e) {
+                console.warn(`Fetch attempt failed for ${addr} on ${c}:`, e);
+                return null;
+            }
         };
 
-        let url = await tryFetch('eth', contract);
+        let url = await tryFetch(chain, contract);
 
-        // If failed and it's Genesis, try Polygon
-        if (!url && node.nftType === 'Genesis') {
+        // If failed and it's Genesis, try Polygon (OpenSea Shared Storefront)
+        if (!url && node.nftType === 'Genesis' && chain === 'eth') {
             url = await tryFetch('polygon', CONFIG.contracts.openseaPoly);
         }
 

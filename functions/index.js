@@ -188,6 +188,12 @@ exports.manualUpdateCache = onRequest(
         console.log(`manualUpdateCache: Reset requested for ${resetTarget}.`);
       }
 
+      // Allow metadata deep scan: ?scanMetadata=true
+      if (req.query.scanMetadata === "true") {
+        syncDates._metadata_scan_requested = true;
+        console.log("manualUpdateCache: Metadata deep scan requested.");
+      }
+
       // Log per-collection sync info
       const syncInfo = {};
       collections.forEach(c => {
@@ -386,19 +392,57 @@ async function fetchNewDataFromMoralis(apiKey, syncDates, genesisSync) {
   }
 
   // 3. Metadata Discovery for new items (all collections)
+  // Added: support for deep scan of missing metadata
+  const deepScan = syncDates._metadata_scan_requested === true;
+  if (deepScan) delete syncDates._metadata_scan_requested;
+
   for (const collection of collections) {
     if (!collection.fetchMetadata) continue;
 
-    const newIds = new Set(
-      allNodes
-        .filter(n => n._custom_type === collection.type && !n.is_metadata)
-        .map(n => n.token_id)
-    );
+    let targetIds;
+    if (deepScan) {
+      // Find all tokens of this type in master collection that lack metadata
+      console.log(`Deep scanning missing metadata for ${collection.name}...`);
+      const existing = await db.collection(MASTER_COLLECTION)
+        .where("_custom_type", "==", collection.type)
+        .get();
 
-    if (newIds.size === 0) continue;
-    console.log(`Fetching metadata for ${newIds.size} new ${collection.name} tokens...`);
+      const missingMetadataIds = [];
+      const hasMetadata = new Set();
 
-    for (const tokenId of newIds) {
+      existing.forEach(doc => {
+        const d = doc.data();
+        if (d.is_metadata && d.custom_image) {
+          hasMetadata.add(d.token_id);
+        }
+      });
+
+      existing.forEach(doc => {
+        const d = doc.data();
+        if (!d.is_metadata && !hasMetadata.has(d.token_id)) {
+          missingMetadataIds.push(d.token_id);
+        }
+      });
+      targetIds = new Set(missingMetadataIds);
+    } else {
+      targetIds = new Set(
+        allNodes
+          .filter(n => n._custom_type === collection.type && !n.is_metadata)
+          .map(n => n.token_id)
+      );
+    }
+
+    if (targetIds.size === 0) continue;
+    console.log(`Fetching metadata for ${targetIds.size} ${collection.name} tokens...`);
+
+    let count = 0;
+    const MAX_METADATA_PER_RUN = deepScan ? 100 : 500; // Limit deep scan to avoid timeout
+
+    for (const tokenId of targetIds) {
+      if (count >= MAX_METADATA_PER_RUN) {
+        console.log(`Limit reached for ${collection.name} metadata fetch this run.`);
+        break;
+      }
       try {
         const res = await axios.get(
           `https://deep-index.moralis.io/api/v2/nft/${collection.address}/${tokenId}`,
@@ -409,20 +453,27 @@ async function fetchNewDataFromMoralis(apiKey, syncDates, genesisSync) {
         );
         const nft = res.data;
         let meta = {};
-        try { meta = nft.metadata ? JSON.parse(nft.metadata) : {}; } catch (e) { /* invalid JSON */ }
+        if (nft.metadata) {
+          try {
+            meta = typeof nft.metadata === 'string' ? JSON.parse(nft.metadata) : nft.metadata;
+          } catch (e) { /* invalid JSON */ }
+        } else if (nft.normalized_metadata) {
+          meta = nft.normalized_metadata;
+        }
 
         allNodes.push(sanitize({
           token_id: nft.token_id,
           transaction_hash: `meta-${collection.type}-${nft.token_id}`,
           block_timestamp: null,
           from_address: NULL_ADDRESS,
-          to_address: nft.owner_of,
-          custom_name: nft.name || `${collection.name} #${nft.token_id}`,
-          custom_image: meta.image || null,
+          to_address: nft.owner_of || NULL_ADDRESS,
+          custom_name: nft.name || meta.name || `${collection.name} #${nft.token_id}`,
+          custom_image: meta.image || meta.image_url || null,
           _custom_type: collection.type,
           _collection_address: collection.address.toLowerCase(),
           is_metadata: true
         }));
+        count++;
         await sleep(200);
       } catch (e) {
         console.error(`Metadata fetch failed for ${collection.name} #${tokenId}:`, e.message);
