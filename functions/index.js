@@ -403,23 +403,45 @@ async function fetchNewDataFromMoralis(apiKey, syncDates, genesisSync) {
     if (deepScan) {
       // Find all tokens of this type in master collection that lack metadata
       console.log(`Deep scanning missing metadata for ${collection.name}...`);
-      const existing = await db.collection(MASTER_COLLECTION)
-        .where("_custom_type", "==", collection.type)
-        .get();
+
+      // Fetch nodes that might be missing metadata. 
+      let snapshot;
+      if (collection.type === 'Generative') {
+        // Fetch by address if possible to be more accurate
+        snapshot = await db.collection(MASTER_COLLECTION)
+          .where("_collection_address", "==", collection.address.toLowerCase())
+          .get();
+
+        // Fallback for very old records that lack even _collection_address
+        if (snapshot.empty) {
+          snapshot = await db.collection(MASTER_COLLECTION).get();
+        }
+      } else {
+        snapshot = await db.collection(MASTER_COLLECTION)
+          .where("_custom_type", "==", collection.type)
+          .get();
+      }
 
       const missingMetadataIds = [];
       const hasMetadata = new Set();
+      const candidates = [];
 
-      existing.forEach(doc => {
+      snapshot.forEach(doc => {
         const d = doc.data();
         if (d.is_metadata && d.custom_image) {
           hasMetadata.add(d.token_id);
+        } else if (!d.is_metadata) {
+          // Check if it belongs to this collection
+          // For Generative, also match if _custom_type is missing
+          const isMatch = (d._custom_type === collection.type) ||
+            (d._collection_address === collection.address.toLowerCase()) ||
+            (collection.type === 'Generative' && !d._custom_type);
+          if (isMatch) candidates.push(d);
         }
       });
 
-      existing.forEach(doc => {
-        const d = doc.data();
-        if (!d.is_metadata && !hasMetadata.has(d.token_id)) {
+      candidates.forEach(d => {
+        if (!hasMetadata.has(d.token_id)) {
           missingMetadataIds.push(d.token_id);
         }
       });

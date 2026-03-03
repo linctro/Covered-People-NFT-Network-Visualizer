@@ -267,9 +267,12 @@ async function fetchRealData() {
         let timeLabel = '';
 
         // 1. Try to load from Local Cache (IndexedDB)
-        console.log("Checking local IndexedDB cache...");
+        const urlParams = new URLSearchParams(window.location.search);
+        const forceRefresh = urlParams.get('refresh') === 'true';
+
+        console.log("Checking local IndexedDB cache...", forceRefresh ? "(Forced Refresh)" : "");
         updateProgress(5, "Checking local cache...");
-        const cachedData = await loadFromIndexedDB();
+        const cachedData = forceRefresh ? null : await loadFromIndexedDB();
 
         if (cachedData && cachedData.nodes && cachedData.nodes.length > 0) {
             console.log("Using cached data from IndexedDB.");
@@ -1007,8 +1010,9 @@ function selectNode(node) {
         idEl.textContent = `Event #${node.id.split('-').pop()}`;
 
         if (node.image) {
-            // Use pre-loaded image from JSON
-            imgEl.src = node.image;
+            // Use pre-loaded image from JSON (Resolve IPFS if needed)
+            const resolvedUrl = resolveIpfs(node.image);
+            imgEl.src = resolvedUrl;
             imgEl.classList.remove('hidden');
             imgPlaceholder.classList.add('hidden');
         } else {
@@ -1119,7 +1123,13 @@ async function fetchNftImage(node) {
                 }
 
                 if (data && data.metadata) {
-                    const meta = typeof data.metadata === 'string' ? JSON.parse(data.metadata) : data.metadata;
+                    let meta;
+                    try {
+                        meta = typeof data.metadata === 'string' ? JSON.parse(data.metadata) : data.metadata;
+                    } catch (e) {
+                        console.warn("Failed to parse metadata:", data.metadata);
+                        meta = {};
+                    }
                     return resolveIpfs(meta.image || meta.image_url || meta.animation_url);
                 }
                 return null;
