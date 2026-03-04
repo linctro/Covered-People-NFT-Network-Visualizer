@@ -455,52 +455,88 @@ async function fetchNewDataFromMoralis(apiKey, syncDates, genesisSync) {
     }
 
     if (targetIds.size === 0) continue;
-    console.log(`Fetching metadata for ${targetIds.size} ${collection.name} tokens...`);
+    console.log(`Fetching metadata for ${targetIds.size} ${collection.name} tokens via batch endpoint...`);
 
-    let count = 0;
-    const MAX_METADATA_PER_RUN = deepScan ? 100 : 500; // Limit deep scan to avoid timeout
+    let metaCursor = null;
+    let fetchedCount = 0;
+    const missingSet = new Set(targetIds);
+    let consecutiveMetaErrors = 0;
 
-    for (const tokenId of targetIds) {
-      if (count >= MAX_METADATA_PER_RUN) {
-        console.log(`Limit reached for ${collection.name} metadata fetch this run.`);
-        break;
-      }
+    // Use the batch collection endpoint to find missing metadata
+    // This avoids the 401 Unauthorized error on the individual item endpoint
+    do {
       try {
-        const res = await axios.get(
-          `https://deep-index.moralis.io/api/v2/nft/${collection.address}/${tokenId}`,
-          {
-            params: { chain: collection.chain, format: "decimal" },
-            headers: { "X-API-Key": apiKey }
-          }
-        );
-        const nft = res.data;
-        let meta = {};
-        if (nft.metadata) {
-          try {
-            meta = typeof nft.metadata === 'string' ? JSON.parse(nft.metadata) : nft.metadata;
-          } catch (e) { /* invalid JSON */ }
-        } else if (nft.normalized_metadata) {
-          meta = nft.normalized_metadata;
+        const res = await axiosWithRetry({
+          method: 'get',
+          url: `https://deep-index.moralis.io/api/v2/nft/${collection.address}`,
+          params: { chain: collection.chain, format: "decimal", limit: 100, cursor: metaCursor, normalizeMetadata: true },
+          headers: { "X-API-Key": apiKey }
+        });
+
+        if (res.data.result) {
+          res.data.result.forEach(nft => {
+            if (missingSet.has(nft.token_id)) {
+              let meta = {};
+              if (nft.metadata) {
+                try {
+                  meta = typeof nft.metadata === 'string' ? JSON.parse(nft.metadata) : nft.metadata;
+                } catch (e) { /* invalid JSON */ }
+              } else if (nft.normalized_metadata) {
+                meta = nft.normalized_metadata;
+              }
+
+              // Server-side IPFS resolution
+              let imgUrl = meta.image || meta.image_url || null;
+              if (imgUrl && typeof imgUrl === 'string') {
+                if (imgUrl.startsWith('ipfs://')) {
+                  imgUrl = imgUrl.replace(/^ipfs:\/\/(ipfs\/)?/, 'https://cloudflare-ipfs.com/ipfs/');
+                } else if (imgUrl.includes('/ipfs/')) {
+                  const hash = imgUrl.split('/ipfs/')[1];
+                  imgUrl = 'https://cloudflare-ipfs.com/ipfs/' + hash;
+                }
+              }
+
+              allNodes.push(sanitize({
+                token_id: nft.token_id,
+                transaction_hash: `meta-${collection.type}-${nft.token_id}`,
+                block_timestamp: null,
+                from_address: NULL_ADDRESS,
+                to_address: nft.owner_of || NULL_ADDRESS,
+                custom_name: nft.name || meta.name || `${collection.name} #${nft.token_id}`,
+                custom_image: imgUrl,
+                _custom_type: collection.type,
+                _collection_address: collection.address.toLowerCase(),
+                is_metadata: true
+              }));
+
+              missingSet.delete(nft.token_id);
+              fetchedCount++;
+            }
+          });
+        }
+        metaCursor = res.data.cursor;
+        consecutiveMetaErrors = 0;
+        await sleep(250);
+
+        // If we found all missing metadata or deep scan limit reached, stop paginating this collection
+        if (missingSet.size === 0) break;
+        if (deepScan && fetchedCount >= 500) {
+          console.log(`Reached limit of 500 metadata items for deep scan on ${collection.name}`);
+          break;
         }
 
-        allNodes.push(sanitize({
-          token_id: nft.token_id,
-          transaction_hash: `meta-${collection.type}-${nft.token_id}`,
-          block_timestamp: null,
-          from_address: NULL_ADDRESS,
-          to_address: nft.owner_of || NULL_ADDRESS,
-          custom_name: nft.name || meta.name || `${collection.name} #${nft.token_id}`,
-          custom_image: meta.image || meta.image_url || null,
-          _custom_type: collection.type,
-          _collection_address: collection.address.toLowerCase(),
-          is_metadata: true
-        }));
-        count++;
-        await sleep(200);
-      } catch (e) {
-        console.error(`Metadata fetch failed for ${collection.name} #${tokenId}:`, e.message);
+      } catch (err) {
+        consecutiveMetaErrors++;
+        console.error(`${collection.name} metadata fetch error (${consecutiveMetaErrors}/3):`, err.message);
+        if (consecutiveMetaErrors >= 3) {
+          console.error(`Too many errors, stopping ${collection.name} metadata fetch.`);
+          break;
+        }
+        await sleep(2000);
       }
-    }
+    } while (metaCursor);
+
+    console.log(`Successfully fetched metadata for ${fetchedCount} items.`);
   }
 
   return allNodes;

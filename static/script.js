@@ -1077,33 +1077,25 @@ function resolveIpfs(url) {
 // Async Fetch Image
 async function fetchNftImage(node) {
     try {
-        // Determine contract and chain
-        let chain = 'eth';
-        let contract = null;
-
-        if (node.nftType === 'Generative') {
-            contract = CONFIG.contracts.generative;
-            chain = 'eth';
-        } else if (node.nftType === 'Genesis') {
-            contract = CONFIG.contracts.openseaEth; // Try Eth first
-            chain = 'eth';
-        } else if (node.nftType === 'RitoBeer') {
-            contract = CONFIG.contracts.ritoBeer;
-            chain = 'polygon';
-        } else if (node.nftType === 'KabaYoko') {
-            contract = CONFIG.contracts.kabaYoko;
-            chain = 'polygon';
-        } else if (node.nftType === 'Nafuda') {
-            contract = CONFIG.contracts.nafuda;
-            chain = 'polygon';
+        // 1. If we already have the image from the backend batch fetch, use it immediately
+        if (node.image) {
+            return resolveIpfs(node.image);
         }
 
-        if (!contract) return null;
+        // 2. If no image exists, we only try the proxy for Genesis NFTs
+        // The individual endpoint for Generative often returns 401 Unauthorized
+        if (node.nftType !== 'Genesis') {
+            return null; // Return null to trigger the "No Image" placeholder
+        }
 
-        // Helper to try fetching metadata
+        // Determine contract and chain for Genesis fallback
+        let chain = 'eth';
+        let contract = CONFIG.contracts.openseaEth; // Try Eth first
+
+        // Helper to try fetching metadata via proxy
         const tryFetch = async (c, addr) => {
             try {
-                console.log(`Fetching metadata for ${node.nftType} #${node.token_id} on ${c}...`);
+                console.log(`Fallback fetching metadata for ${node.nftType} #${node.token_id} on ${c}...`);
                 const body = {
                     endpoint: `/nft/${addr}/${node.token_id}`,
                     params: { chain: c, format: 'decimal' }
@@ -1117,7 +1109,6 @@ async function fetchNftImage(node) {
                 if (!res.ok) return null;
                 const data = await res.json();
 
-                // Moralis often returns a 'normalized_metadata' object or 'metadata' string.
                 if (data.normalized_metadata && data.normalized_metadata.image) {
                     return resolveIpfs(data.normalized_metadata.image);
                 }
@@ -1127,7 +1118,6 @@ async function fetchNftImage(node) {
                     try {
                         meta = typeof data.metadata === 'string' ? JSON.parse(data.metadata) : data.metadata;
                     } catch (e) {
-                        console.warn("Failed to parse metadata:", data.metadata);
                         meta = {};
                     }
                     return resolveIpfs(meta.image || meta.image_url || meta.animation_url);
