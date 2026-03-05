@@ -494,6 +494,15 @@ async function fetchNewDataFromMoralis(apiKey, syncDates, genesisSync) {
                   const hash = imgUrl.split('/ipfs/')[1];
                   imgUrl = 'https://cloudflare-ipfs.com/ipfs/' + hash;
                 }
+                // Handle Arweave sandboxed subdomain URLs (e.g., https://xxx.arweave.net/txId/path)
+                // These return 404 on arweave.net but work on ar-io.dev
+                const arMatch = imgUrl.match(/^https?:\/\/[a-z0-9]+\.arweave\.net\/(.+)$/i);
+                if (arMatch) {
+                  imgUrl = 'https://ar-io.dev/' + arMatch[1];
+                } else if (imgUrl.includes('arweave.net/')) {
+                  const arPath = imgUrl.split('arweave.net/')[1];
+                  imgUrl = 'https://ar-io.dev/' + arPath;
+                }
               }
 
               allNodes.push(sanitize({

@@ -1054,8 +1054,9 @@ function selectNode(node) {
     panel.classList.remove('hidden');
 }
 
-// Helper: Resolve IPFS to Gateway
-// Using Cloudflare IPFS gateway for better performance and reliability than public ipfs.io
+// Helper: Resolve IPFS and Arweave URLs to working gateways
+// - IPFS: Cloudflare gateway for reliability
+// - Arweave: ar-io.dev gateway (arweave.net sandbox URLs return 404)
 function resolveIpfs(url) {
     if (!url) return null;
     if (typeof url !== 'string') return url;
@@ -1065,10 +1066,23 @@ function resolveIpfs(url) {
         return url.replace(/^ipfs:\/\/(ipfs\/)?/, 'https://cloudflare-ipfs.com/ipfs/');
     }
 
-    // Handle ipfs.io or other gateways already in the URL
+    // Handle ipfs.io or other IPFS gateways already in the URL
     if (url.includes('/ipfs/')) {
         const hash = url.split('/ipfs/')[1];
         return 'https://cloudflare-ipfs.com/ipfs/' + hash;
+    }
+
+    // Handle Arweave sandboxed subdomain URLs (e.g., https://xxx.arweave.net/txId/path)
+    // These return 404 on arweave.net but work on ar-io.dev
+    const arweaveSubdomainMatch = url.match(/^https?:\/\/[a-z0-9]+\.arweave\.net\/(.+)$/i);
+    if (arweaveSubdomainMatch) {
+        return 'https://ar-io.dev/' + arweaveSubdomainMatch[1];
+    }
+
+    // Handle plain arweave.net URLs that might also be broken
+    if (url.includes('arweave.net/')) {
+        const path = url.split('arweave.net/')[1];
+        return 'https://ar-io.dev/' + path;
     }
 
     return url;
