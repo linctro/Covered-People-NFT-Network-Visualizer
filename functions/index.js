@@ -600,10 +600,14 @@ async function generateServingData() {
   });
 
   // Merge metadata back into transfer nodes
+  // IMPORTANT: Metadata record from batch fetch is authoritative.
+  // We always use the metadata record's image, even if the transfer already has one
+  // (because old transfers may have stale/broken URLs from earlier sync runs).
   allTransfers.forEach(node => {
     const key = `${node._custom_type || 'Generative'}_${node.token_id}`;
     if (metadataMap[key]) {
-      if (!node.custom_image) node.custom_image = metadataMap[key].image;
+      // Always prefer metadata image (override stale embedded images)
+      node.custom_image = metadataMap[key].image || node.custom_image;
       if (!node.custom_name) node.custom_name = metadataMap[key].name;
     }
   });
