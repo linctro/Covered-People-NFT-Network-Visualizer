@@ -10,6 +10,7 @@ const { PubSub } = require('@google-cloud/pubsub');
 
 admin.initializeApp();
 const db = admin.firestore();
+db.settings({ ignoreUndefinedProperties: true });
 const pubsub = new PubSub();
 
 // Define the secret
