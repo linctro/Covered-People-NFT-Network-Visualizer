@@ -4,6 +4,7 @@ const { onMessagePublished } = require("firebase-functions/v2/pubsub");
 const admin = require("firebase-admin");
 const axios = require("axios");
 const { defineSecret } = require("firebase-functions/params");
+const { Alchemy, Network } = require("alchemy-sdk");
 const fs = require("fs");
 const path = require("path");
 const { PubSub } = require('@google-cloud/pubsub');
@@ -15,6 +16,7 @@ const pubsub = new PubSub();
 
 // Define the secret
 const MORALIS_API_KEY = defineSecret("MORALIS_API_KEY");
+const ALCHEMY_API_KEY = defineSecret("ALCHEMY_API_KEY");
 
 // Constants
 const OpenseaPoly = "0x2953399124f0cbb46d2cbacd8a89cf0599974963".toLowerCase();
@@ -161,13 +163,25 @@ exports.moralisProxy = onRequest(
 exports.manualUpdateCache = onRequest(
   {
     cors: true,
-    secrets: [MORALIS_API_KEY],
+    secrets: [MORALIS_API_KEY, ALCHEMY_API_KEY],
     timeoutSeconds: 540, // 9 minutes
     memory: "512MiB",
   },
   async (req, res) => {
     console.log("manualUpdateCache: Starting direct update...");
     try {
+      const alchemyKey = ALCHEMY_API_KEY.value();
+      if (!alchemyKey) {
+        return res.status(500).json({ error: "ALCHEMY_API_KEY is not set." });
+      }
+
+      // Alchemy インスタンスを作成
+      const alchemy = new Alchemy({
+        apiKey: alchemyKey,
+        network: Network.ETH_MAINNET
+      });
+      console.log("✓ Alchemy API Key loaded successfully");
+      
       const apiKey = MORALIS_API_KEY.value();
       if (!apiKey) {
         return res.status(500).json({ error: "MORALIS_API_KEY is not set." });
@@ -264,12 +278,21 @@ exports.manualUpdateCache = onRequest(
 exports.onUpdateCacheSchedule = onMessagePublished(
   {
     topic: "update-nft-cache",
-    secrets: [MORALIS_API_KEY],
+    secrets: [MORALIS_API_KEY, ALCHEMY_API_KEY],
     timeoutSeconds: 540, // 9 minutes
     memory: "512MiB",
   },
   async (event) => {
     console.log("Starting Incremental Cache Update...");
+    const alchemyKey = ALCHEMY_API_KEY.value();
+    if (!alchemyKey) throw new Error("ALCHEMY_API_KEY not set");
+    
+    const alchemy = new Alchemy({
+      apiKey: alchemyKey,
+      network: Network.ETH_MAINNET
+    });
+    console.log("✓ Alchemy API Key loaded successfully");
+    
     const apiKey = MORALIS_API_KEY.value();
     if (!apiKey) throw new Error("MORALIS_API_KEY not set");
 
