@@ -1,8 +1,6 @@
 const { onRequest } = require("firebase-functions/v2/https");
-const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { onMessagePublished } = require("firebase-functions/v2/pubsub");
 const admin = require("firebase-admin");
-const axios = require("axios");
 const { defineSecret } = require("firebase-functions/params");
 const { Alchemy, Network } = require("alchemy-sdk");
 const fs = require("fs");
@@ -15,7 +13,6 @@ db.settings({ ignoreUndefinedProperties: true });
 const pubsub = new PubSub();
 
 // Define the secret
-const MORALIS_API_KEY = defineSecret("MORALIS_API_KEY");
 const ALCHEMY_API_KEY = defineSecret("ALCHEMY_API_KEY");
 
 // Constants
@@ -31,14 +28,24 @@ const collections = JSON.parse(
 );
 
 /**
- * Helper: Get API key with emulator fallback
+ * Helper: Get Alchemy API key with emulator fallback
  */
-function getApiKey() {
+function getAlchemyKey() {
   try {
-    const val = MORALIS_API_KEY.value();
+    const val = ALCHEMY_API_KEY.value();
     if (val) return val;
   } catch (e) { /* emulator mode */ }
-  return process.env.MORALIS_API_KEY || null;
+  return process.env.ALCHEMY_API_KEY || null;
+}
+
+/**
+ * Helper: Create Alchemy clients for ETH and Polygon
+ */
+function createAlchemyClients(apiKey) {
+  return {
+    eth: new Alchemy({ apiKey, network: Network.ETH_MAINNET }),
+    polygon: new Alchemy({ apiKey, network: Network.MATIC_MAINNET })
+  };
 }
 
 /**
@@ -47,28 +54,8 @@ function getApiKey() {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * Helper: Axios request with retry and exponential backoff
- */
-async function axiosWithRetry(config, retries = 3, backoff = 1000) {
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      const res = await axios(config);
-      return res;
-    } catch (err) {
-      const status = err.response ? err.response.status : 0;
-      if (attempt < retries && (status === 429 || status >= 500 || status === 0)) {
-        console.warn(`Retry ${attempt + 1}/${retries} for ${config.url} (status: ${status})`);
-        await sleep(backoff * Math.pow(2, attempt));
-      } else {
-        throw err;
-      }
-    }
-  }
-}
-
-/**
  * HTTP Function: Return cached NFTs from Firestore (Serving Layer)
- * This now reads from the pre-aggregated serving document.
+ * This reads from the pre-aggregated serving document.
  */
 exports.getNFTs = onRequest(
   {
@@ -111,13 +98,13 @@ exports.getNFTs = onRequest(
 );
 
 /**
- * HTTP Function: Proxy requests to Moralis API
- * Used by frontend to fetch NFT metadata/images on demand.
+ * HTTP Function: Proxy requests to fetch NFT metadata/images
+ * Powered by Alchemy SDK (maintains URL compatibility with /api/proxy)
  */
 exports.moralisProxy = onRequest(
   {
     cors: true,
-    secrets: [MORALIS_API_KEY],
+    secrets: [ALCHEMY_API_KEY],
     maxInstances: 10,
   },
   async (req, res) => {
@@ -126,9 +113,9 @@ exports.moralisProxy = onRequest(
         return res.status(405).json({ error: 'POST only' });
       }
 
-      const apiKey = MORALIS_API_KEY.value();
+      const apiKey = getAlchemyKey();
       if (!apiKey) {
-        return res.status(500).json({ error: 'MORALIS_API_KEY not set' });
+        return res.status(500).json({ error: 'ALCHEMY_API_KEY not set' });
       }
 
       const { endpoint, params } = req.body;
@@ -136,56 +123,56 @@ exports.moralisProxy = onRequest(
         return res.status(400).json({ error: 'Missing endpoint in request body' });
       }
 
-      // Only allow /nft/ endpoints for security
-      if (!endpoint.startsWith('/nft/')) {
-        return res.status(403).json({ error: 'Only /nft/ endpoints are allowed' });
+      // Endpoint format expected: /nft/:contractAddress/:tokenId
+      const match = endpoint.match(/\/nft\/([^/]+)\/([^/]+)/);
+      if (!match) {
+        return res.status(400).json({ error: 'Unsupported endpoint format' });
       }
 
-      const response = await axios.get(`https://deep-index.moralis.io/api/v2${endpoint}`, {
-        params: params || {},
-        headers: { 'X-API-Key': apiKey }
-      });
+      const [, contractAddress, tokenId] = match;
+      const chain = (params && params.chain && params.chain.toLowerCase() === 'polygon') ? 'polygon' : 'eth';
+      const clients = createAlchemyClients(apiKey);
+      const client = chain === 'polygon' ? clients.polygon : clients.eth;
 
-      res.set('Cache-Control', 'public, max-age=86400'); // Cache for 24h
-      return res.status(200).json(response.data);
+      const meta = await client.nft.getNftMetadata(contractAddress, tokenId);
+      const imageUrl = meta.image?.cachedUrl || meta.image?.originalUrl || meta.raw?.metadata?.image || null;
+
+      res.set('Cache-Control', 'public, max-age=86400');
+      return res.status(200).json({
+        normalized_metadata: {
+          name: meta.name || '',
+          image: imageUrl
+        },
+        metadata: meta.raw?.metadata || {}
+      });
     } catch (error) {
       console.error('Proxy error:', error.message);
-      const status = error.response ? error.response.status : 500;
+      const status = error.status || 500;
       return res.status(status).json({ error: error.message });
     }
   }
 );
 
 /**
- * Manual Update Function (HTTP) - Directly executes the update logic
- * This bypasses PubSub for reliability and easier debugging.
+ * Manual Update Function (HTTP) - Directly executes the update logic via Alchemy
  */
 exports.manualUpdateCache = onRequest(
   {
     cors: true,
-    secrets: [MORALIS_API_KEY, ALCHEMY_API_KEY],
-    timeoutSeconds: 540, // 9 minutes
+    secrets: [ALCHEMY_API_KEY],
+    timeoutSeconds: 540,
     memory: "512MiB",
   },
   async (req, res) => {
-    console.log("manualUpdateCache: Starting direct update...");
+    console.log("manualUpdateCache: Starting direct update via Alchemy...");
     try {
-      const alchemyKey = ALCHEMY_API_KEY.value();
+      const alchemyKey = getAlchemyKey();
       if (!alchemyKey) {
         return res.status(500).json({ error: "ALCHEMY_API_KEY is not set." });
       }
 
-      // Alchemy インスタンスを作成
-      const alchemy = new Alchemy({
-        apiKey: alchemyKey,
-        network: Network.ETH_MAINNET
-      });
-      console.log("✓ Alchemy API Key loaded successfully");
-      
-      const apiKey = MORALIS_API_KEY.value();
-      if (!apiKey) {
-        return res.status(500).json({ error: "MORALIS_API_KEY is not set." });
-      }
+      const clients = createAlchemyClients(alchemyKey);
+      console.log("✓ Alchemy API Key loaded and clients initialized successfully");
       console.log(`manualUpdateCache: Loaded ${collections.length} collections: ${collections.map(c => c.name).join(', ')}`);
 
       // 1. Get Per-Collection Sync Dates
@@ -203,22 +190,9 @@ exports.manualUpdateCache = onRequest(
         console.log(`manualUpdateCache: Reset requested for ${resetTarget}.`);
       }
 
-      // Allow metadata deep scan: ?scanMetadata=true
-      if (req.query.scanMetadata === "true") {
-        syncDates._metadata_scan_requested = true;
-        console.log("manualUpdateCache: Metadata deep scan requested.");
-      }
-
-      // Log per-collection sync info
-      const syncInfo = {};
-      collections.forEach(c => {
-        syncInfo[c.type] = syncDates[c.type] || "NEW (2022-01-01)";
-      });
-      console.log("manualUpdateCache: Sync dates:", JSON.stringify(syncInfo));
-
-      // 2. Fetch New Data (Per-Collection Incremental)
-      const newNodes = await fetchNewDataFromMoralis(apiKey, syncDates, genesisSync);
-      console.log(`manualUpdateCache: Fetched ${newNodes.length} new items.`);
+      // 2. Fetch New Data via Alchemy
+      const newNodes = await fetchNewDataFromAlchemy(clients, syncDates, genesisSync);
+      console.log(`manualUpdateCache: Fetched ${newNodes.length} items from Alchemy.`);
 
       // 3. Save New Data to Master Collection (History)
       if (newNodes.length > 0) {
@@ -229,18 +203,15 @@ exports.manualUpdateCache = onRequest(
       // 4. Generate Serving Data (Aggregation)
       await generateServingData();
 
-      // 5. Update Per-Collection Sync Dates (only for collections that were fetched)
+      // 5. Update Per-Collection Sync Dates
       const now = new Date().toISOString();
-      const fetchedTypes = new Set(newNodes.map(n => n._custom_type).filter(Boolean));
-      // Update sync date for collections that returned data, or that were attempted
       collections.forEach(c => {
-        // Always update sync date so we don't re-fetch empty collections
         syncDates[c.type] = now;
       });
       await db.doc(META_DOC).set({
         sync_dates: syncDates,
         genesis_sync_date: now,
-        last_sync_date: now // backward compat
+        last_sync_date: now
       }, { merge: true });
 
       // Per-collection breakdown
@@ -250,24 +221,17 @@ exports.manualUpdateCache = onRequest(
         breakdown[t] = (breakdown[t] || 0) + 1;
       });
 
-      res.json({
-        success: true,
-        version: "multi-collection-v3",
-        message: "Update completed successfully!",
-        collections_loaded: collections.map(c => c.name),
+      return res.status(200).json({
+        status: "success",
+        provider: "Alchemy",
         new_items: newNodes.length,
         breakdown,
-        sync_dates_used: syncInfo,
-        updated_at: now
+        sync_dates: syncDates,
+        timestamp: now
       });
-
     } catch (error) {
-      console.error("manualUpdateCache: FAILED:", error);
-      res.status(500).json({
-        error: error.message,
-        stack: error.stack,
-        detail: "Check Cloud Functions logs for more information."
-      });
+      console.error("manualUpdateCache error:", error);
+      return res.status(500).json({ error: error.message, stack: error.stack });
     }
   }
 );
@@ -278,303 +242,201 @@ exports.manualUpdateCache = onRequest(
 exports.onUpdateCacheSchedule = onMessagePublished(
   {
     topic: "update-nft-cache",
-    secrets: [MORALIS_API_KEY, ALCHEMY_API_KEY],
-    timeoutSeconds: 540, // 9 minutes
+    secrets: [ALCHEMY_API_KEY],
+    timeoutSeconds: 540,
     memory: "512MiB",
   },
   async (event) => {
-    console.log("Starting Incremental Cache Update...");
-    const alchemyKey = ALCHEMY_API_KEY.value();
+    console.log("Starting Incremental Cache Update via Alchemy...");
+    const alchemyKey = getAlchemyKey();
     if (!alchemyKey) throw new Error("ALCHEMY_API_KEY not set");
-    
-    const alchemy = new Alchemy({
-      apiKey: alchemyKey,
-      network: Network.ETH_MAINNET
-    });
-    console.log("✓ Alchemy API Key loaded successfully");
-    
-    const apiKey = MORALIS_API_KEY.value();
-    if (!apiKey) throw new Error("MORALIS_API_KEY not set");
+
+    const clients = createAlchemyClients(alchemyKey);
+    console.log("✓ Alchemy API Key loaded and clients initialized successfully");
 
     try {
-      // 1. Get Per-Collection Sync Dates
       const metaDoc = await db.doc(META_DOC).get();
       const syncDates = (metaDoc.exists && metaDoc.data().sync_dates) || {};
       const genesisSync = (metaDoc.exists && metaDoc.data().genesis_sync_date) || "2022-01-01T00:00:00.000Z";
 
-      // 2. Fetch New Data (Per-Collection Incremental)
-      const newNodes = await fetchNewDataFromMoralis(apiKey, syncDates, genesisSync);
-      console.log(`Fetched ${newNodes.length} new items.`);
+      const newNodes = await fetchNewDataFromAlchemy(clients, syncDates, genesisSync);
+      console.log(`Incremental update: Fetched ${newNodes.length} items from Alchemy.`);
 
-      // 3. Save New Data
       if (newNodes.length > 0) {
         await saveToMasterCollection(newNodes);
+        console.log(`Incremental update: Saved ${newNodes.length} items to master collection.`);
       }
 
-      // 4. Generate Serving Data
       await generateServingData();
 
-      // 5. Update Per-Collection Sync Dates
       const now = new Date().toISOString();
-      collections.forEach(c => { syncDates[c.type] = now; });
+      collections.forEach(c => {
+        syncDates[c.type] = now;
+      });
       await db.doc(META_DOC).set({
         sync_dates: syncDates,
         genesis_sync_date: now,
         last_sync_date: now
       }, { merge: true });
 
-      console.log("Incremental update complete.");
+      console.log("Incremental update completed successfully.");
     } catch (error) {
-      console.error("Cache update failed:", error);
+      console.error("Incremental update failed:", error);
       throw error;
     }
   }
 );
 
-async function fetchNewDataFromMoralis(apiKey, syncDates, genesisSync) {
-  const DEFAULT_FROM = "2022-01-01T00:00:00.000Z";
+/**
+ * Fetch New Data using Alchemy SDK
+ */
+async function fetchNewDataFromAlchemy(clients, syncDates, genesisSync) {
   let allNodes = [];
 
-  // 1. Genesis NFTs (Incremental) - individual token transfers
-  const genesisFromDate = genesisSync || DEFAULT_FROM;
-  console.log(`Genesis: fetching from ${genesisFromDate}`);
+  // 1. Genesis NFTs (Load target list and resolve latest owner)
   const genesisPath = path.join(__dirname, "genesis_nfts.json");
-  const genesisTargets = JSON.parse(fs.readFileSync(genesisPath, "utf-8"));
+  if (fs.existsSync(genesisPath)) {
+    const genesisTargets = JSON.parse(fs.readFileSync(genesisPath, "utf-8"));
+    console.log(`Processing ${genesisTargets.length} Genesis NFTs...`);
 
-  for (const target of genesisTargets) {
-    const chain = target.token_address.toLowerCase() === OpenseaPoly ? "polygon" : "eth";
-    try {
-      const res = await axios.get(`https://deep-index.moralis.io/api/v2/nft/${target.token_address}/${target.token_id}/transfers`, {
-        params: { chain, format: "decimal", limit: 100, from_date: genesisFromDate },
-        headers: { "X-API-Key": apiKey }
-      });
+    for (const target of genesisTargets) {
+      const isPolygon = target.token_address.toLowerCase() === OpenseaPoly;
+      const client = isPolygon ? clients.polygon : clients.eth;
 
-      if (res.data.result) {
-        res.data.result.forEach(tx => {
-          allNodes.push(sanitize({
-            ...tx,
-            custom_image: target.image_url || null,
-            custom_name: target.name,
-            is_genesis_target: true,
-            _custom_type: "Genesis"
-          }));
-        });
+      let owner = NULL_ADDRESS;
+      try {
+        const ownerRes = await client.nft.getOwnersForNft(target.token_address, target.token_id);
+        if (ownerRes.owners && ownerRes.owners.length > 0) {
+          owner = ownerRes.owners[0].toLowerCase();
+        }
+      } catch (err) {
+        // Fallback to null address if owner lookup fails
       }
-      await sleep(200);
-    } catch (err) {
-      console.warn(`Genesis fetch error for ${target.name}:`, err.message);
+
+      allNodes.push(sanitize({
+        token_id: target.token_id,
+        transaction_hash: `genesis_${target.token_id}`,
+        block_timestamp: null,
+        from_address: NULL_ADDRESS,
+        to_address: owner,
+        custom_name: target.name,
+        custom_image: target.image_url || (target.metadata && target.metadata.image) || null,
+        is_genesis_target: true,
+        _custom_type: "Genesis",
+        _collection_address: target.token_address.toLowerCase()
+      }));
+
+      await sleep(40);
     }
   }
 
-  // 2. Collection-based Transfers - sorted: new collections first (no sync date)
-  const sortedCollections = [...collections].sort((a, b) => {
-    const aHasSync = syncDates[a.type] ? 1 : 0;
-    const bHasSync = syncDates[b.type] ? 1 : 0;
-    return aHasSync - bHasSync; // NEW (no sync) first
-  });
+  // 2. Collection-based Transfers
+  for (const collection of collections) {
+    const client = collection.chain.toLowerCase() === 'eth' ? clients.eth : clients.polygon;
+    console.log(`Fetching transfers for ${collection.name} (${collection.chain}) via Alchemy...`);
 
-  for (const collection of sortedCollections) {
-    const collectionFromDate = syncDates[collection.type] || DEFAULT_FROM;
-    console.log(`Fetching transfers for ${collection.name} (${collection.chain}) from ${collectionFromDate}...`);
-    let cursor = null;
-    let consecutiveErrors = 0;
-    const MAX_CONSECUTIVE_ERRORS = 3;
+    let pageKey = undefined;
+    let pageCount = 0;
+    const MAX_PAGES = 10; // 1000 transfers limit per run for safety
 
     do {
       try {
-        const res = await axiosWithRetry({
-          method: 'get',
-          url: `https://deep-index.moralis.io/api/v2/nft/${collection.address}/transfers`,
-          params: { chain: collection.chain, format: "decimal", limit: 100, cursor, from_date: collectionFromDate },
-          headers: { "X-API-Key": apiKey }
+        const res = await client.nft.getTransfersForContract(collection.address, {
+          pageKey,
+          limit: 100
         });
 
-        if (res.data.result) {
-          res.data.result.forEach(tx => {
+        if (res.nfts && res.nfts.length > 0) {
+          res.nfts.forEach(tx => {
             allNodes.push(sanitize({
-              ...tx,
+              token_id: tx.tokenId,
+              transaction_hash: tx.transactionHash,
+              block_timestamp: null,
+              from_address: tx.from ? tx.from.toLowerCase() : NULL_ADDRESS,
+              to_address: tx.to ? tx.to.toLowerCase() : NULL_ADDRESS,
               _custom_type: collection.type,
               _collection_address: collection.address.toLowerCase()
             }));
           });
         }
-        cursor = res.data.cursor;
-        consecutiveErrors = 0;
-        await sleep(250);
+        pageKey = res.pageKey;
+        pageCount++;
+        if (pageCount >= MAX_PAGES) break;
+        await sleep(100);
       } catch (err) {
-        consecutiveErrors++;
-        console.error(`${collection.name} fetch error (${consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS}):`, err.message);
-        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-          console.error(`Too many errors, stopping ${collection.name} fetch.`);
-          break;
-        }
-        await sleep(2000);
+        console.error(`${collection.name} transfer fetch error:`, err.message);
+        break;
       }
-    } while (cursor);
+    } while (pageKey);
 
     console.log(`${collection.name}: fetched ${allNodes.filter(n => n._custom_type === collection.type).length} transfers.`);
   }
 
-  // 3. Metadata Discovery for new items (all collections)
-  // Added: support for deep scan of missing metadata
-  const deepScan = syncDates._metadata_scan_requested === true;
-  if (deepScan) delete syncDates._metadata_scan_requested;
-
+  // 3. Metadata Discovery for Collections
   for (const collection of collections) {
     if (!collection.fetchMetadata) continue;
+    const client = collection.chain.toLowerCase() === 'eth' ? clients.eth : clients.polygon;
 
-    let targetIds;
-    if (deepScan) {
-      // Find all tokens of this type in master collection that lack metadata
-      console.log(`Deep scanning missing metadata for ${collection.name}...`);
+    const targetIds = [...new Set(
+      allNodes
+        .filter(n => n._custom_type === collection.type && !n.is_metadata)
+        .map(n => n.token_id)
+    )];
 
-      // Fetch nodes that might be missing metadata. 
-      let snapshot;
-      if (collection.type === 'Generative') {
-        // Fetch by address if possible to be more accurate
-        snapshot = await db.collection(MASTER_COLLECTION)
-          .where("_collection_address", "==", collection.address.toLowerCase())
-          .get();
+    if (targetIds.length === 0) continue;
+    console.log(`Fetching metadata for ${targetIds.length} ${collection.name} tokens via Alchemy batch...`);
 
-        // Fallback for very old records that lack even _collection_address
-        if (snapshot.empty) {
-          snapshot = await db.collection(MASTER_COLLECTION).get();
-        }
-      } else {
-        snapshot = await db.collection(MASTER_COLLECTION)
-          .where("_custom_type", "==", collection.type)
-          .get();
-      }
+    const BATCH_SIZE = 100;
+    for (let i = 0; i < targetIds.length; i += BATCH_SIZE) {
+      const chunk = targetIds.slice(i, i + BATCH_SIZE);
+      const tokenRequests = chunk.map(id => ({
+        contractAddress: collection.address,
+        tokenId: id,
+        tokenType: 'ERC721'
+      }));
 
-      const missingMetadataIds = [];
-      const hasMetadata = new Set();
-      const candidates = [];
-
-      snapshot.forEach(doc => {
-        const d = doc.data();
-        if (d.is_metadata && d.custom_image) {
-          hasMetadata.add(d.token_id);
-        } else if (!d.is_metadata) {
-          // Check if it belongs to this collection
-          // For Generative, also match if _custom_type is missing
-          const isMatch = (d._custom_type === collection.type) ||
-            (d._collection_address === collection.address.toLowerCase()) ||
-            (collection.type === 'Generative' && !d._custom_type);
-          if (isMatch) candidates.push(d);
-        }
-      });
-
-      candidates.forEach(d => {
-        if (!hasMetadata.has(d.token_id)) {
-          missingMetadataIds.push(d.token_id);
-        }
-      });
-      targetIds = new Set(missingMetadataIds);
-    } else {
-      targetIds = new Set(
-        allNodes
-          .filter(n => n._custom_type === collection.type && !n.is_metadata)
-          .map(n => n.token_id)
-      );
-    }
-
-    if (targetIds.size === 0) continue;
-    console.log(`Fetching metadata for ${targetIds.size} ${collection.name} tokens via batch endpoint...`);
-
-    let metaCursor = null;
-    let fetchedCount = 0;
-    const missingSet = new Set(targetIds);
-    let consecutiveMetaErrors = 0;
-
-    // Use the batch collection endpoint to find missing metadata
-    // This avoids the 401 Unauthorized error on the individual item endpoint
-    do {
       try {
-        const res = await axiosWithRetry({
-          method: 'get',
-          url: `https://deep-index.moralis.io/api/v2/nft/${collection.address}`,
-          params: { chain: collection.chain, format: "decimal", limit: 100, cursor: metaCursor, normalizeMetadata: true },
-          headers: { "X-API-Key": apiKey }
-        });
-
-        if (res.data.result) {
-          res.data.result.forEach(nft => {
-            if (missingSet.has(nft.token_id)) {
-              let meta = {};
-              if (nft.metadata) {
-                try {
-                  meta = typeof nft.metadata === 'string' ? JSON.parse(nft.metadata) : nft.metadata;
-                } catch (e) { /* invalid JSON */ }
-              } else if (nft.normalized_metadata) {
-                meta = nft.normalized_metadata;
+        const batchRes = await client.nft.getNftMetadataBatch(tokenRequests);
+        if (batchRes && batchRes.nfts) {
+          batchRes.nfts.forEach(nft => {
+            let imgUrl = nft.image?.cachedUrl || nft.image?.originalUrl || nft.raw?.metadata?.image || null;
+            if (imgUrl && typeof imgUrl === 'string') {
+              if (imgUrl.startsWith('ipfs://')) {
+                imgUrl = imgUrl.replace(/^ipfs:\/\/(ipfs\/)?/, 'https://cloudflare-ipfs.com/ipfs/');
               }
-
-              // Server-side IPFS resolution
-              let imgUrl = meta.image || meta.image_url || null;
-              if (imgUrl && typeof imgUrl === 'string') {
-                if (imgUrl.startsWith('ipfs://')) {
-                  imgUrl = imgUrl.replace(/^ipfs:\/\/(ipfs\/)?/, 'https://cloudflare-ipfs.com/ipfs/');
-                } else if (imgUrl.includes('/ipfs/')) {
-                  const hash = imgUrl.split('/ipfs/')[1];
-                  imgUrl = 'https://cloudflare-ipfs.com/ipfs/' + hash;
-                }
-                // Handle Arweave sandboxed subdomain URLs (e.g., https://xxx.arweave.net/txId/path)
-                // These return 404 on arweave.net but work on ar-io.dev
-                const arMatch = imgUrl.match(/^https?:\/\/[a-z0-9]+\.arweave\.net\/(.+)$/i);
-                if (arMatch) {
-                  imgUrl = 'https://ar-io.dev/' + arMatch[1];
-                } else if (imgUrl.includes('arweave.net/')) {
-                  const arPath = imgUrl.split('arweave.net/')[1];
-                  imgUrl = 'https://ar-io.dev/' + arPath;
-                }
+              const arMatch = imgUrl.match(/^https?:\/\/[a-z0-9]+\.arweave\.net\/(.+)$/i);
+              if (arMatch) {
+                imgUrl = 'https://ar-io.dev/' + arMatch[1];
               }
-
-              allNodes.push(sanitize({
-                token_id: nft.token_id,
-                transaction_hash: `meta-${collection.type}-${nft.token_id}`,
-                block_timestamp: null,
-                from_address: NULL_ADDRESS,
-                to_address: nft.owner_of || NULL_ADDRESS,
-                custom_name: nft.name || meta.name || `${collection.name} #${nft.token_id}`,
-                custom_image: imgUrl,
-                _custom_type: collection.type,
-                _collection_address: collection.address.toLowerCase(),
-                is_metadata: true
-              }));
-
-              missingSet.delete(nft.token_id);
-              fetchedCount++;
             }
+
+            allNodes.push(sanitize({
+              token_id: nft.tokenId,
+              transaction_hash: `meta-${collection.type}-${nft.tokenId}`,
+              block_timestamp: null,
+              from_address: NULL_ADDRESS,
+              to_address: NULL_ADDRESS,
+              custom_name: nft.name || `${collection.name} #${nft.tokenId}`,
+              custom_image: imgUrl,
+              _custom_type: collection.type,
+              _collection_address: collection.address.toLowerCase(),
+              is_metadata: true
+            }));
           });
         }
-        metaCursor = res.data.cursor;
-        consecutiveMetaErrors = 0;
-        await sleep(250);
-
-        // If we found all missing metadata or deep scan limit reached, stop paginating this collection
-        if (missingSet.size === 0) break;
-        if (deepScan && fetchedCount >= 500) {
-          console.log(`Reached limit of 500 metadata items for deep scan on ${collection.name}`);
-          break;
-        }
-
+        await sleep(150);
       } catch (err) {
-        consecutiveMetaErrors++;
-        console.error(`${collection.name} metadata fetch error (${consecutiveMetaErrors}/3):`, err.message);
-        if (consecutiveMetaErrors >= 3) {
-          console.error(`Too many errors, stopping ${collection.name} metadata fetch.`);
-          break;
-        }
-        await sleep(2000);
+        console.error(`Metadata batch fetch error for ${collection.name}:`, err.message);
       }
-    } while (metaCursor);
-
-    console.log(`Successfully fetched metadata for ${fetchedCount} items.`);
+    }
   }
 
   return allNodes;
 }
 
+/**
+ * Save nodes to Firestore Master Collection in batches
+ */
 async function saveToMasterCollection(nodes) {
   const batchSize = 400;
   for (let i = 0; i < nodes.length; i += batchSize) {
@@ -583,7 +445,7 @@ async function saveToMasterCollection(nodes) {
 
     chunk.forEach(node => {
       const docId = `${node.token_id}_${node.transaction_hash}`;
-      const ref = db.collection(MASTER_COLLECTION).doc(docId); // cache/master_data/history/docId
+      const ref = db.collection(MASTER_COLLECTION).doc(docId);
       batch.set(ref, node, { merge: true });
     });
 
@@ -592,6 +454,9 @@ async function saveToMasterCollection(nodes) {
   }
 }
 
+/**
+ * Helper to ensure undefined values are converted to null for Firestore
+ */
 function sanitize(obj) {
   const clean = {};
   Object.keys(obj).forEach(key => {
@@ -604,6 +469,9 @@ function sanitize(obj) {
   return clean;
 }
 
+/**
+ * Generate Serving Data (Aggregation Layer)
+ */
 async function generateServingData() {
   console.log("Generating serving data...");
 
@@ -633,23 +501,17 @@ async function generateServingData() {
   });
 
   // Merge metadata back into transfer nodes
-  // IMPORTANT: Metadata record from batch fetch is authoritative.
-  // We always use the metadata record's image, even if the transfer already has one
-  // (because old transfers may have stale/broken URLs from earlier sync runs).
   allTransfers.forEach(node => {
     const key = `${node._custom_type || 'Generative'}_${node.token_id}`;
     if (metadataMap[key]) {
-      // Always prefer metadata image (override stale embedded images)
       node.custom_image = metadataMap[key].image || node.custom_image;
       if (!node.custom_name) node.custom_name = metadataMap[key].name;
     }
   });
 
-  // Filter: only include tokens that have been transferred FROM the mint wallet
-  // Tokens that have never left the mint wallet are excluded
+  // Filter: only include tokens transferred FROM the mint wallet for filterFromMint collections
   let nodes;
   if (filterFromMintTypes.size > 0) {
-    // Group transfers by (type + token_id) for filterFromMint collections
     const tokenTransfers = {};
     allTransfers.forEach(node => {
       if (filterFromMintTypes.has(node._custom_type)) {
@@ -659,7 +521,6 @@ async function generateServingData() {
       }
     });
 
-    // Find tokens that have been transferred FROM the mint wallet (= sold/distributed)
     const distributedTokens = new Set();
     Object.entries(tokenTransfers).forEach(([key, transfers]) => {
       const hasLeftMintWallet = transfers.some(
@@ -668,7 +529,6 @@ async function generateServingData() {
       if (hasLeftMintWallet) distributedTokens.add(key);
     });
 
-    // Filter: keep all non-filterFromMint nodes + only distributed filterFromMint nodes
     nodes = allTransfers.filter(node => {
       if (!filterFromMintTypes.has(node._custom_type)) return true;
       const key = `${node._custom_type}_${node.token_id}`;
@@ -680,13 +540,12 @@ async function generateServingData() {
     nodes = allTransfers;
   }
 
-  const jsonString = JSON.stringify({ nodes }); // simplistic size check
+  const jsonString = JSON.stringify({ nodes });
   const sizeBytes = Buffer.byteLength(jsonString);
   console.log(`Total serving data size: ${(sizeBytes / 1024 / 1024).toFixed(2)} MB`);
 
   const MAX_SIZE = 900000; // ~900KB
 
-  // If small enough, single doc
   if (sizeBytes < MAX_SIZE) {
     await db.collection("cache").doc("serving_data").set({
       nodes,
@@ -694,11 +553,9 @@ async function generateServingData() {
       last_updated: new Date().toISOString()
     });
   } else {
-    // Chunk it
     const chunkCount = Math.ceil(sizeBytes / MAX_SIZE);
     const itemsPerChunk = Math.ceil(nodes.length / chunkCount);
 
-    // Firestore batch has a 500 operation limit, so we may need multiple batches
     const allOps = [];
     for (let c = 0; c < chunkCount; c++) {
       const start = c * itemsPerChunk;
@@ -706,10 +563,8 @@ async function generateServingData() {
       const chunkNodes = nodes.slice(start, end);
       allOps.push({ ref: db.collection("cache").doc(`serving_data_chunk_${c}`), data: { nodes: chunkNodes, index: c } });
     }
-    // Main doc points to chunks
     allOps.push({ ref: db.collection("cache").doc("serving_data"), data: { chunks: chunkCount, last_updated: new Date().toISOString() } });
 
-    // Write in batches of 450 (safely under 500 limit)
     const BATCH_LIMIT = 450;
     for (let i = 0; i < allOps.length; i += BATCH_LIMIT) {
       const batch = db.batch();

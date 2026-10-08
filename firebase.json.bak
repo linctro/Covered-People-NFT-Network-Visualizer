@@ -1,0 +1,28 @@
+{
+  "hosting": {
+    "public": "static",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "rewrites": [
+      {
+        "source": "/api/nfts",
+        "function": "getNFTs"
+      },
+      {
+        "source": "/api/proxy",
+        "function": "moralisProxy"
+      },
+      {
+        "source": "/api/update-cache",
+        "function": "manualUpdateCache"
+      }
+    ]
+  },
+  "functions": {
+    "source": "functions",
+    "runtime": "nodejs20"
+  }
+}
