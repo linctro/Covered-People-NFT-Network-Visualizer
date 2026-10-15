@@ -293,7 +293,7 @@ exports.onUpdateCacheSchedule = onMessagePublished(
 async function fetchNewDataFromAlchemy(clients, syncDates, genesisSync) {
   let allNodes = [];
 
-  // 1. Genesis NFTs (Load target list and resolve latest owner)
+  // 1. Genesis NFTs (Load target list and resolve latest owner + transfers)
   const genesisPath = path.join(__dirname, "genesis_nfts.json");
   if (fs.existsSync(genesisPath)) {
     const genesisTargets = JSON.parse(fs.readFileSync(genesisPath, "utf-8"));
@@ -304,29 +304,69 @@ async function fetchNewDataFromAlchemy(clients, syncDates, genesisSync) {
       const client = isPolygon ? clients.polygon : clients.eth;
 
       let owner = NULL_ADDRESS;
+      let block_timestamp = null;
+      let txHash = null;
+      let fromAddress = NULL_ADDRESS;
       try {
         const ownerRes = await client.nft.getOwnersForNft(target.token_address, target.token_id);
-        if (ownerRes.owners && ownerRes.owners.length > 0) {
-          owner = ownerRes.owners[0].toLowerCase();
+        const nonBurnOwners = (ownerRes.owners || []).filter(o => 
+          o && 
+          o.toLowerCase() !== NULL_ADDRESS && 
+          o.toLowerCase() !== "0x000000000000000000000000000000000000dead"
+        );
+        if (nonBurnOwners.length > 0) {
+          owner = nonBurnOwners[0].toLowerCase();
+          
+          // Fetch transfer history for this owner to get the timestamp (descending, up to 1000 items)
+          const hexTokenId = "0x" + BigInt(target.token_id).toString(16);
+          let pageKey = undefined;
+          let page = 0;
+          do {
+            const transferRes = await client.core.getAssetTransfers({
+              fromBlock: "0x0",
+              toBlock: "latest",
+              toAddress: owner,
+              contractAddresses: [target.token_address],
+              category: ["erc721", "erc1155"],
+              withMetadata: true,
+              order: "desc",
+              maxCount: 1000,
+              pageKey
+            });
+            const transfer = transferRes.transfers.find(t => 
+              (t.tokenId && t.tokenId.toLowerCase() === hexTokenId.toLowerCase()) || 
+              (t.erc1155Metadata && t.erc1155Metadata.some(m => m.tokenId.toLowerCase() === hexTokenId.toLowerCase()))
+            );
+            if (transfer && transfer.metadata) {
+              block_timestamp = transfer.metadata.blockTimestamp;
+              txHash = transfer.hash;
+              fromAddress = transfer.from ? transfer.from.toLowerCase() : NULL_ADDRESS;
+              break;
+            }
+            pageKey = transferRes.pageKey;
+            page++;
+          } while (pageKey && page < 3);
         }
       } catch (err) {
         // Fallback to null address if owner lookup fails
       }
 
-      allNodes.push(sanitize({
-        token_id: target.token_id,
-        transaction_hash: `genesis_${target.token_id}`,
-        block_timestamp: null,
-        from_address: NULL_ADDRESS,
-        to_address: owner,
-        custom_name: target.name,
-        custom_image: target.image_url || (target.metadata && target.metadata.image) || null,
-        is_genesis_target: true,
-        _custom_type: "Genesis",
-        _collection_address: target.token_address.toLowerCase()
-      }));
+      if (block_timestamp) {
+        allNodes.push(sanitize({
+          token_id: target.token_id,
+          transaction_hash: txHash || `genesis_${target.token_id}`,
+          block_timestamp: block_timestamp,
+          from_address: fromAddress,
+          to_address: owner,
+          custom_name: target.name,
+          custom_image: target.image_url || (target.metadata && target.metadata.image) || null,
+          is_genesis_target: true,
+          _custom_type: "Genesis",
+          _collection_address: target.token_address.toLowerCase()
+        }));
+      }
 
-      await sleep(40);
+      await sleep(60);
     }
   }
 
@@ -337,26 +377,42 @@ async function fetchNewDataFromAlchemy(clients, syncDates, genesisSync) {
 
     let pageKey = undefined;
     let pageCount = 0;
-    const MAX_PAGES = 10; // 1000 transfers limit per run for safety
+    const MAX_PAGES = 15; // with maxCount 1000, covers up to 15,000 transfers
 
     do {
       try {
-        const res = await client.nft.getTransfersForContract(collection.address, {
+        const res = await client.core.getAssetTransfers({
+          fromBlock: "0x0",
+          toBlock: "latest",
+          contractAddresses: [collection.address],
+          category: ["erc721", "erc1155"],
+          withMetadata: true,
           pageKey,
-          limit: 100
+          maxCount: 1000
         });
 
-        if (res.nfts && res.nfts.length > 0) {
-          res.nfts.forEach(tx => {
-            allNodes.push(sanitize({
-              token_id: tx.tokenId,
-              transaction_hash: tx.transactionHash,
-              block_timestamp: null,
-              from_address: tx.from ? tx.from.toLowerCase() : NULL_ADDRESS,
-              to_address: tx.to ? tx.to.toLowerCase() : NULL_ADDRESS,
-              _custom_type: collection.type,
-              _collection_address: collection.address.toLowerCase()
-            }));
+        if (res.transfers && res.transfers.length > 0) {
+          res.transfers.forEach(tx => {
+            let hexTokenIds = [];
+            if (tx.category === "erc1155" && tx.erc1155Metadata) {
+                hexTokenIds = tx.erc1155Metadata.map(m => m.tokenId);
+            } else if (tx.tokenId) {
+                hexTokenIds = [tx.tokenId];
+            }
+
+            hexTokenIds.forEach(hexTokenId => {
+              const decTokenId = BigInt(hexTokenId).toString();
+              
+              allNodes.push(sanitize({
+                token_id: decTokenId,
+                transaction_hash: tx.hash,
+                block_timestamp: tx.metadata.blockTimestamp,
+                from_address: tx.from ? tx.from.toLowerCase() : NULL_ADDRESS,
+                to_address: tx.to ? tx.to.toLowerCase() : NULL_ADDRESS,
+                _custom_type: collection.type,
+                _collection_address: collection.address.toLowerCase()
+              }));
+            });
           });
         }
         pageKey = res.pageKey;
@@ -413,7 +469,7 @@ async function fetchNewDataFromAlchemy(clients, syncDates, genesisSync) {
             allNodes.push(sanitize({
               token_id: nft.tokenId,
               transaction_hash: `meta-${collection.type}-${nft.tokenId}`,
-              block_timestamp: null,
+              block_timestamp: undefined, // metadata node doesn't overwrite timestamp
               from_address: NULL_ADDRESS,
               to_address: NULL_ADDRESS,
               custom_name: nft.name || `${collection.name} #${nft.tokenId}`,
@@ -460,9 +516,7 @@ async function saveToMasterCollection(nodes) {
 function sanitize(obj) {
   const clean = {};
   Object.keys(obj).forEach(key => {
-    if (obj[key] === undefined) {
-      clean[key] = null;
-    } else {
+    if (obj[key] !== undefined) {
       clean[key] = obj[key];
     }
   });
@@ -489,6 +543,7 @@ async function generateServingData() {
   // Aggregate metadata and transfers
   const metadataMap = {};
   const allTransfers = [];
+  const staleDocRefs = [];
 
   snapshot.forEach(doc => {
     const data = doc.data();
@@ -496,9 +551,28 @@ async function generateServingData() {
       const key = `${data._custom_type || 'Generative'}_${data.token_id}`;
       metadataMap[key] = { image: data.custom_image, name: data.custom_name };
     } else {
+      // Clean up legacy placeholder genesis dummy nodes that lack real transfer metadata
+      if (data.transaction_hash && data.transaction_hash.startsWith("genesis_")) {
+        staleDocRefs.push(doc.ref);
+        return;
+      }
+      // Skip any transfer nodes that lack a valid block_timestamp so they don't group at 2022 Unknown
+      if (!data.block_timestamp) {
+        return;
+      }
       allTransfers.push(data);
     }
   });
+
+  // Clean up stale dummy genesis docs from master collection
+  if (staleDocRefs.length > 0) {
+    console.log(`Cleaning up ${staleDocRefs.length} stale dummy genesis documents from master collection...`);
+    for (let i = 0; i < staleDocRefs.length; i += 400) {
+      const batch = db.batch();
+      staleDocRefs.slice(i, i + 400).forEach(ref => batch.delete(ref));
+      await batch.commit();
+    }
+  }
 
   // Merge metadata back into transfer nodes
   allTransfers.forEach(node => {
